@@ -42,6 +42,7 @@ local S = {
 	SpeedOn = false, Speed = 32,
 	NoSpread = false, BigHead = false, HeadSize = 4,
 	NPCAim = false, NPCHead = false, NPCDist = 120, NPCName = "",
+	Dest = "farm", FlySpeed = 60, Flying = false, InfStamina = false,
 }
 
 local draw = false
@@ -675,12 +676,132 @@ local function myHum()
 	return ch and ch:FindFirstChildOfClass("Humanoid")
 end
 
-keep(RS.Heartbeat:Connect(function()
-	if S.SpeedOn then
-		local h = myHum()
-		if h and h.WalkSpeed ~= S.Speed then h.WalkSpeed = S.Speed end
+-- 1) tenta mudar o WalkSpeed; 2) se o jogo travar/voltar o valor, completa andando direto
+-- pelo CFrame, medindo a velocidade real. Assim a velocidade final fica perto do valor escolhido.
+local speedWas = false
+keep(RS.Heartbeat:Connect(function(dt)
+	if not S.SpeedOn then
+		if speedWas then
+			speedWas = false
+			local h0 = myHum()
+			if h0 then h0.WalkSpeed = 16 end
+		end
+		return
+	end
+	speedWas = true
+	if S.Flying then return end
+
+	local ch = LP.Character
+	local h = ch and ch:FindFirstChildOfClass("Humanoid")
+	local r = ch and ch:FindFirstChild("HumanoidRootPart")
+	if not h or not r or h.Health <= 0 then return end
+
+	if h.WalkSpeed < S.Speed then h.WalkSpeed = S.Speed end
+
+	local md = h.MoveDirection
+	if md.Magnitude > 0.05 then
+		local v = r.AssemblyLinearVelocity
+		local cur = Vector3.new(v.X, 0, v.Z).Magnitude
+		if cur < S.Speed - 2 then
+			r.CFrame = r.CFrame + md.Unit * (S.Speed - cur) * dt
+		end
 	end
 end))
+
+-- ==========================================
+-- STAMINA INFINITA (tentativa genérica)
+-- Procura valores/atributos chamados "Stamina" no seu jogador e na memória do jogo
+-- e mantém no máximo. Depende de como o jogo guarda a stamina.
+-- ==========================================
+local stamEntries = {}
+local stamWasOn, stamNeedScan, stamScanning = false, true, false
+local stamOk = {stamina = true, currentstamina = true, curstamina = true, staminavalue = true, playerstamina = true}
+
+local function cleanName(n) return (string.gsub(string.lower(tostring(n)), "[^%a]", "")) end
+
+local function scanStamInst(inst)
+	if (inst:IsA("NumberValue") or inst:IsA("IntValue")) and stamOk[cleanName(inst.Name)] then
+		local mx = math.max(inst.Value, 100)
+		local sib = inst.Parent and inst.Parent:FindFirstChild("Max" .. inst.Name)
+		if sib and (sib:IsA("NumberValue") or sib:IsA("IntValue")) then mx = math.max(mx, sib.Value) end
+		stamEntries[#stamEntries + 1] = {kind = "val", inst = inst, max = mx}
+	end
+	for name, v in pairs(inst:GetAttributes()) do
+		if type(v) == "number" and stamOk[cleanName(name)] then
+			local mxA = inst:GetAttribute("Max" .. name)
+			stamEntries[#stamEntries + 1] = {kind = "attr", inst = inst, name = name,
+				max = math.max(v, 100, type(mxA) == "number" and mxA or 0)}
+		end
+	end
+end
+
+local function scanStamina()
+	stamEntries = {}
+	local roots = {LP.Character}
+	for _, c in ipairs(LP:GetChildren()) do
+		if not c:IsA("PlayerGui") then roots[#roots + 1] = c end
+	end
+	for _, root in ipairs(roots) do
+		scanStamInst(root)
+		for _, d in ipairs(root:GetDescendants()) do scanStamInst(d) end
+	end
+
+	if getgc then
+		local okk, list = pcall(getgc, true)
+		if okk and type(list) == "table" then
+			local n = 0
+			for _, t in ipairs(list) do
+				if type(t) == "table" then
+					pcall(function()
+						for k, v in pairs(t) do
+							if type(k) == "string" and type(v) == "number" and stamOk[cleanName(k)] then
+								stamEntries[#stamEntries + 1] = {kind = "tab", t = t, key = k, max = math.max(v, 100)}
+							end
+						end
+					end)
+				end
+				n = n + 1
+				if n % 1500 == 0 then task.wait() end -- nao trava o jogo
+			end
+		end
+	end
+end
+
+local function applyStam(e)
+	if e.kind == "val" then
+		if e.inst.Value < e.max then e.inst.Value = e.max end
+	elseif e.kind == "attr" then
+		local v = e.inst:GetAttribute(e.name)
+		if type(v) == "number" and v < e.max then e.inst:SetAttribute(e.name, e.max) end
+	else
+		if e.t[e.key] < e.max then e.t[e.key] = e.max end
+	end
+end
+
+keep(RS.Heartbeat:Connect(function()
+	if not S.InfStamina then return end
+	for _, e in ipairs(stamEntries) do pcall(applyStam, e) end
+end))
+
+keep(LP.CharacterAdded:Connect(function() stamNeedScan = true end))
+
+task.spawn(function()
+	while Gui.Parent do
+		if S.InfStamina then
+			if (not stamWasOn or stamNeedScan) and not stamScanning then
+				stamWasOn, stamNeedScan, stamScanning = true, false, true
+				task.spawn(function()
+					local okk, e = pcall(scanStamina)
+					if not okk then fail("stamina", e) end
+					stamScanning = false
+				end)
+			end
+		else
+			stamWasOn = false
+		end
+		task.wait(0.5)
+	end
+end)
 
 -- ==========================================
 -- LOOP PRINCIPAL (cada parte protegida separadamente)
@@ -719,49 +840,129 @@ local bound = pcall(function() RS:BindToRenderStep(NAME, Enum.RenderPriority.Las
 if not bound then keep(RS.RenderStepped:Connect(onFrame)) end
 
 -- ==========================================
--- TELEPORTE
+-- VOO ATÉ O DESTINO
+-- O teleporte instantâneo era desfeito pelo jogo. Aqui o personagem sobe, voa
+-- até o lugar e desce, andando de verdade em vez de "pular" de um ponto ao outro.
 -- ==========================================
-local savedPos
+local DEST = {
+	farm = {label = "Farm Zone", names = {"farmzone", "farmarea", "zonafarm", "areafarm"}},
+	gun = {label = "Gun Shop", names = {"gunshop", "gunstore", "weaponshop", "weaponstore", "armory", "armoury", "lojadearmas"}},
+	equip = {label = "Equipamentos", names = {"equipmentshop", "equipshop", "equipmentstore", "gearshop", "gearstore",
+		"supplyshop", "itemshop", "lojadeequipamentos", "shop", "store"}},
+}
+local marks = {} -- lugares que você marcou: marks.farm = Vector3
 
 local function myRoot()
 	local ch = LP.Character
 	return ch and ch:FindFirstChild("HumanoidRootPart")
 end
 
-local function tpTo(pos)
-	local r = myRoot()
-	if not r then return false end
-	r.AssemblyLinearVelocity = Vector3.zero
-	r.CFrame = CFrame.new(pos + Vector3.new(0, 4, 0))
-	return true
-end
-
 local function norm(n) return (string.gsub(string.lower(n), "[%s_%-]", "")) end
 
--- procura no mapa algo chamado "Farm Zone" / "FarmZone" / "Farm_Zone" / "FarmArea"
-local farmNames = {"farmzone", "farmarea", "zonafarm", "areafarm"}
-local function findFarmZone()
+-- procura no mapa pelo nome; os nomes da lista estão em ordem de prioridade
+local function findPlace(key)
+	local names = DEST[key].names
+	local bestIdx, bestPos = math.huge, nil
 	local n = 0
 	for _, d in ipairs(WS:GetDescendants()) do
 		n = n + 1
 		if n % 3000 == 0 then task.wait() end
 		if d:IsA("BasePart") or d:IsA("Model") or d:IsA("Folder") then
 			local nm = norm(d.Name)
-			for _, f in ipairs(farmNames) do
+			for idx, f in ipairs(names) do
+				if idx >= bestIdx then break end
 				if string.find(nm, f, 1, true) then
-					if d:IsA("BasePart") then return d.Position end
-					if d:IsA("Model") then
+					local pos
+					if d:IsA("BasePart") then
+						pos = d.Position
+					elseif d:IsA("Model") then
 						local okk, cf = pcall(function() return d:GetPivot() end)
-						if okk then return cf.Position end
+						if okk then pos = cf.Position end
+					else
+						for _, c in ipairs(d:GetDescendants()) do
+							if c:IsA("BasePart") then pos = c.Position break end
+						end
 					end
-					for _, c in ipairs(d:GetDescendants()) do
-						if c:IsA("BasePart") then return c.Position end
-					end
+					if pos then bestIdx, bestPos = idx, pos end
+					break
 				end
 			end
 		end
 	end
-	return nil
+	return bestPos
+end
+
+local flyToken = 0
+local flyClip = {}
+
+local function stopFly()
+	flyToken = flyToken + 1
+	S.Flying = false
+	for part in pairs(flyClip) do
+		if part.Parent then part.CanCollide = true end
+		flyClip[part] = nil
+	end
+end
+
+local function flyTo(dest, label)
+	local r = myRoot()
+	if not r then note("Personagem não encontrado.") return end
+	stopFly()
+	local token = flyToken
+	S.Flying = true
+
+	local cruise = math.max(r.Position.Y, dest.Y) + 45
+	local goal = dest + Vector3.new(0, 4, 0)
+	local phase = 1
+	local conn, clipConn
+
+	local function finish(msg)
+		if conn then conn:Disconnect() end
+		if clipConn then clipConn:Disconnect() end
+		if token == flyToken then stopFly() end
+		if msg then note(msg) end
+	end
+
+	-- atravessa paredes só durante o voo
+	clipConn = RS.Stepped:Connect(function()
+		if token ~= flyToken then return end
+		local ch = LP.Character
+		if not ch then return end
+		for _, d in ipairs(ch:GetChildren()) do
+			if d:IsA("BasePart") and d.CanCollide then
+				d.CanCollide = false
+				flyClip[d] = true
+			end
+		end
+	end)
+
+	conn = RS.Heartbeat:Connect(function(dt)
+		if token ~= flyToken then finish() return end
+		local root, h = myRoot(), myHum()
+		if not root or not h or h.Health <= 0 then finish("Voo cancelado.") return end
+
+		local pos = root.Position
+		local target
+		if phase == 1 then
+			target = Vector3.new(pos.X, cruise, pos.Z)
+		elseif phase == 2 then
+			target = Vector3.new(goal.X, cruise, goal.Z)
+		else
+			target = goal
+		end
+
+		local delta = target - pos
+		local step = S.FlySpeed * dt
+		if delta.Magnitude <= step then
+			root.CFrame = root.CFrame + delta
+			phase = phase + 1
+			if phase > 3 then finish("Chegou em " .. label .. "!") return end
+		else
+			root.CFrame = root.CFrame + delta.Unit * step
+		end
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+	end)
 end
 
 -- ==========================================
@@ -969,6 +1170,101 @@ local function buildPanel()
 			Text = "", AutoButtonColor = false}, r)
 		hov(hit, s)
 		local track = Corner(New("Frame", {AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 12, 0.5, 0), Size = UDim2.new(1, -24, 0, 5),
+		BackgroundColor3 = S[key] and K.Red or K.Off, BorderSizePixel = 0}, r), 10)
+		local knob = Corner(New("Frame", {AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.new(0, 14, 0, 14), BackgroundColor3 = K.White,
+			Position = S[key] and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0), BorderSizePixel = 0}, track), 7)
+		local hit = New("TextButton", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 5}, r)
+		hov(hit, s)
+		hit.MouseButton1Click:Connect(function()
+			S[key] = not S[key]
+			tween(track, {BackgroundColor3 = S[key] and K.Red or K.Off})
+			tween(knob, {Position = S[key] and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)})
+		end)
+	end
+
+	local function Dropdown(pg, title, opts, key)
+		local r, s = Card(pg, 46)
+		r.ClipsDescendants = true
+		Lbl(r, title, UDim2.new(0, 12, 0, 0), UDim2.new(1, -140, 0, 46), FB, 12, K.Txt)
+
+		local head = Corner(New("TextButton", {AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 9), Size = UDim2.new(0, 112, 0, 28),
+			BackgroundColor3 = K.Bg2, Text = "", AutoButtonColor = false, BorderSizePixel = 0, ZIndex = 5}, r), 8)
+		Stroke(head, K.Red, 1, 0.5)
+		local cur = Lbl(head, "", UDim2.new(0, 10, 0, 0), UDim2.new(1, -30, 1, 0), FB, 11, K.Txt)
+		cur.ZIndex = 6
+
+		-- setinha (dois tracos em V) que gira ao abrir
+		local arrow = New("Frame", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -9, 0.5, 0), Size = UDim2.new(0, 12, 0, 12),
+			BackgroundTransparency = 1, ZIndex = 6}, head)
+		for _, d in ipairs({{40, 3.5}, {-40, 8.5}}) do
+			Corner(New("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, d[2], 0.5, 1), Size = UDim2.new(0, 7, 0, 2),
+				BackgroundColor3 = K.Red2, BorderSizePixel = 0, Rotation = d[1], ZIndex = 6}, arrow), 1)
+		end
+
+		local n = #opts
+		local optBtns = {}
+		local openState = false
+		local setOpen
+
+		local function refresh()
+			for i, b in ipairs(optBtns) do
+				local on = (opts[i][2] == S[key])
+				b.BackgroundColor3 = on and K.Red or K.Bg2
+				b.TextColor3 = on and K.White or K.Dim
+				if on then cur.Text = opts[i][1] end
+			end
+		end
+
+		for i, o in ipairs(opts) do
+			local b = Corner(New("TextButton", {Position = UDim2.new(0, 10, 0, 50 + (i - 1) * 30), Size = UDim2.new(1, -20, 0, 26),
+				BackgroundColor3 = K.Bg2, Text = o[1], Font = FB, TextSize = 11, TextColor3 = K.Dim, AutoButtonColor = false,
+				BorderSizePixel = 0}, r), 7)
+			b.MouseButton1Click:Connect(function()
+				S[key] = o[2]
+				refresh()
+				setOpen(false)
+			end)
+			optBtns[i] = b
+		end
+
+		setOpen = function(v)
+			openState = v
+			tween(r, {Size = UDim2.new(1, 0, 0, v and (50 + n * 30 + 2) or 46)})
+			tween(arrow, {Rotation = v and 180 or 0})
+		end
+
+		head.MouseButton1Click:Connect(function() setOpen(not openState) end)
+		refresh()
+	end
+
+	local function Action(pg, title, desc, label, cb)
+		local r, s = Card(pg, 46)
+		titles(r, title, desc, 118)
+		local b = Corner(New("TextButton", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), Size = UDim2.new(0, 100, 0, 28),
+			BackgroundColor3 = K.Red, Text = label, Font = FH, TextSize = 10, TextColor3 = K.White, AutoButtonColor = false,
+			BorderSizePixel = 0, ZIndex = 5}, r), 8)
+		hov(b, s)
+		b.MouseButton1Click:Connect(function() cb(b) end)
+	end
+
+	local function Input(pg, title, ph, key)
+		local r = Card(pg, 46)
+		Lbl(r, title, UDim2.new(0, 12, 0, 0), UDim2.new(1, -150, 0, 46), FB, 12, K.Txt)
+		local box = Corner(New("TextBox", {AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 9), Size = UDim2.new(0, 124, 0, 28),
+			BackgroundColor3 = K.Bg2, Text = S[key], PlaceholderText = ph, PlaceholderColor3 = K.Dim, TextColor3 = K.Txt, Font = FM,
+			TextSize = 11, ClearTextOnFocus = false, BorderSizePixel = 0}, r), 8)
+		Stroke(box, K.Red, 1, 0.5)
+		box.FocusLost:Connect(function() S[key] = box.Text end)
+	end
+
+	local function Slide(pg, title, mn, mx, key)
+		local r, s = Card(pg, 56)
+		Lbl(r, title, UDim2.new(0, 12, 0, 6), UDim2.new(0.65, 0, 0, 18), FB, 12, K.Txt)
+		local val = Lbl(r, tostring(S[key]), UDim2.new(0.65, 0, 0, 6), UDim2.new(0.35, -12, 0, 18), FB, 12, K.Red2, Enum.TextXAlignment.Right)
+		local hit = New("TextButton", {Position = UDim2.new(0, 0, 0, 24), Size = UDim2.new(1, 0, 0, 32), BackgroundTransparency = 1,
+			Text = "", AutoButtonColor = false}, r)
+		hov(hit, s)
+		local track = Corner(New("Frame", {AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 12, 0.5, 0), Size = UDim2.new(1, -24, 0, 5),
 			BackgroundColor3 = K.Off, BorderSizePixel = 0}, hit), 3)
 		local fill = Corner(New("Frame", {Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = K.Red, BorderSizePixel = 0}, track), 3)
 		New("UIGradient", {Color = ColorSequence.new(K.DarkRed, K.Red2)}, fill)
@@ -1036,8 +1332,10 @@ local function buildPanel()
 	Slide(pEsp, "Ajuste vertical", -60, 60, "ESPOffset")
 
 	Head(pSpd, "CORRIDA")
-	Switch(pSpd, "Ativar speed", "Velocidade personalizada", "SpeedOn")
+	Switch(pSpd, "Ativar speed", "Aumenta a velocidade mesmo se o jogo travar", "SpeedOn")
 	Slide(pSpd, "Velocidade", 16, 120, "Speed")
+	Head(pSpd, "STAMINA")
+	Switch(pSpd, "Stamina infinita", "Corre rápido sem cansar (procura a stamina do jogo)", "InfStamina")
 
 	local pFarm = pages.FARM
 	Head(pFarm, "ZUMBIS / NPCS")
@@ -1045,35 +1343,42 @@ local function buildPanel()
 	Switch(pFarm, "Mirar na cabeça", "Desligado: mira no tronco (acerta mais fácil)", "NPCHead")
 	Slide(pFarm, "Distância dos NPCs (studs)", 20, 500, "NPCDist")
 	Input(pFarm, "Filtrar por nome", "ex: Zombie", "NPCName")
-	Head(pFarm, "TELEPORTE")
-	Action(pFarm, "Ir para a Farm Zone", "Procura a área pelo nome no mapa", "IR", function(b)
+	Head(pFarm, "VOO ATÉ O DESTINO")
+	Dropdown(pFarm, "Destino", {{"Farm Zone", "farm"}, {"Gun Shop", "gun"}, {"Equipamentos", "equip"}}, "Dest")
+	Action(pFarm, "Voar até o destino", "Sobe, voa e desce no lugar", "VOAR", function(b)
+		local key = S.Dest
+		local label = DEST[key].label
+		if marks[key] then
+			note("Voando para " .. label .. "...")
+			flyTo(marks[key], label)
+			return
+		end
 		b.Text = "PROCURANDO..."
 		task.spawn(function()
-			local okk, pos = pcall(findFarmZone)
-			if okk and pos and tpTo(pos) then
-				note("Teleportado para a Farm Zone!")
+			local okk, pos = pcall(findPlace, key)
+			pcall(function() b.Text = "VOAR" end)
+			if okk and pos then
+				note("Voando para " .. label .. "...")
+				flyTo(pos, label)
 			else
-				note("Não achei a Farm Zone pelo nome. Vá até lá, toque em MARCAR e depois em TELEPORTAR.")
+				note("Não achei " .. label .. " pelo nome. Vá até lá, escolha o destino e toque em MARCAR.")
 			end
-			pcall(function() b.Text = "IR" end)
 		end)
 	end)
-	Action(pFarm, "Marcar local atual", "Fique na Farm Zone e toque aqui", "MARCAR", function(b)
+	Action(pFarm, "Marcar este lugar", "Salva sua posição no destino escolhido", "MARCAR", function(b)
 		local r = myRoot()
 		if r then
-			savedPos = r.Position
+			marks[S.Dest] = r.Position
 			b.Text = "MARCADO!"
-			note("Local marcado!")
+			note(DEST[S.Dest].label .. " marcado!")
 			task.delay(1.5, function() pcall(function() b.Text = "MARCAR" end) end)
 		end
 	end)
-	Action(pFarm, "Teleportar para o local", "Vai até o local que você marcou", "TELEPORTAR", function(b)
-		if savedPos and tpTo(savedPos) then
-			note("Teleportado!")
-		else
-			note("Nenhum local marcado ainda.")
-		end
+	Action(pFarm, "Cancelar voo", "Para o voo e você cai no chão", "CANCELAR", function()
+		stopFly()
+		note("Voo cancelado.")
 	end)
+	Slide(pFarm, "Velocidade do voo", 30, 150, "FlySpeed")
 
 	local pDc = pages.DISCORD
 	Head(pDc, "COMUNIDADE")
@@ -1171,7 +1476,8 @@ task.spawn(function()
 					for m, h in pairs(npcs) do
 						if m.Parent and h.Health > 0 and nameOk(m) then c = c + 1 end
 					end
-					status.Text = string.format("Alvos: %d  •  NPCs: %d  •  Drawing: %s", n, c, draw and "ok" or "indisponível")
+					local extra = S.InfStamina and string.format("  •  Stamina: %d", #stamEntries) or ""
+					status.Text = string.format("Alvos: %d  •  NPCs: %d  •  Drawing: %s", n, c, draw and "ok" or "indisponível") .. extra
 					status.TextColor3 = K.Dim
 				end
 			end)
@@ -1208,6 +1514,7 @@ Gui.Destroying:Connect(function()
 	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 	for part in pairs(headOrig) do restoreHead(part) end
 	pcall(restoreSpread)
+	pcall(stopFly)
 	for _, o in pairs(ESP) do killObj(o) end
 	if fov then pcall(function() fov:Remove() end) end
 	local h = myHum()
@@ -1222,4 +1529,4 @@ end)
 if not okAll then
 	warn("[Netrix] erro: " .. tostring(errAll))
 	note("ERRO: " .. string.sub(tostring(errAll), 1, 150))
-end
+end	
