@@ -43,7 +43,9 @@ local S = {
 	NoSpread = false, BigHead = false, HeadSize = 4,
 	NPCAim = false, NPCHead = false, NPCDist = 120, NPCName = "",
 	Dest = "farm", FlySpeed = 40, Flying = false, InfStamina = false,
-	Travel = "walk", AutoFarm = false, AutoLoot = false, FarmRange = 30, GunName = "",
+	Travel = "walk", AutoFarm = false, AutoLoot = false, LootRange = 30, GunName = "",
+	FlyFree = false, FlyFreeSpeed = 40, Noclip = false,
+	ESPName = false, ESPDist = false, ColESP = K.Red, ColFOV = K.Red,
 }
 
 local draw = false
@@ -320,13 +322,31 @@ local function nameOk(m)
 	return string.find(string.lower(m.Name), string.lower(f), 1, true) ~= nil
 end
 
+-- NPC morto (vida zero, estado Dead, marcado como morto ou deitado no chão) nunca vira alvo
+local deadNpc = setmetatable({}, {__mode = "k"})
+local function alive(m, h)
+	if deadNpc[m] then return false end
+	local dead = h.Health <= 0.5
+	if not dead then
+		local okk, st = pcall(function() return h:GetState() end)
+		dead = okk and st == Enum.HumanoidStateType.Dead
+	end
+	if not dead then
+		dead = m:GetAttribute("Dead") == true or m:GetAttribute("IsDead") == true or m:GetAttribute("Died") == true
+	end
+	if dead then deadNpc[m] = true return false end
+	local r = rootOf(m)
+	if r and r.CFrame.UpVector.Y < 0.3 then return false end -- deitado/ragdoll
+	return true
+end
+
 local npcLock
 local function pickNpc()
 	local me = myPos()
 	local best, bd = nil, math.huge
 	for m, h in pairs(npcs) do
 		if m.Parent and h.Parent then
-			if h.Health > 0 and nameOk(m) then
+			if alive(m, h) and nameOk(m) then
 				local r = rootOf(m)
 				if r then
 					local d = (r.Position - me).Magnitude
@@ -339,7 +359,7 @@ local function pickNpc()
 	end
 
 	-- mantém o alvo atual enquanto ele ainda estiver quase tão perto quanto o melhor
-	if npcLock and npcs[npcLock] and npcLock.Parent and npcs[npcLock].Health > 0 and nameOk(npcLock) then
+	if npcLock and npcs[npcLock] and npcLock.Parent and alive(npcLock, npcs[npcLock]) and nameOk(npcLock) then
 		local r = rootOf(npcLock)
 		if r and (r.Position - me).Magnitude <= bd + 6 then return npcLock end
 	end
@@ -521,6 +541,7 @@ local function newObj()
 	local o = {
 		Snap = Drawing.new("Line"), Box = Drawing.new("Square"),
 		HpBg = Drawing.new("Line"), HpFill = Drawing.new("Line"), HpTxt = Drawing.new("Text"),
+		Name = Drawing.new("Text"), Dist = Drawing.new("Text"),
 		Bones = {},
 	}
 	o.Snap.Color = K.Red
@@ -535,6 +556,13 @@ local function newObj()
 	o.HpTxt.Center = true
 	o.HpTxt.Outline = true
 	o.HpTxt.Color = K.White
+	for _, t in ipairs({o.Name, o.Dist}) do
+		t.Size = 13
+		t.Center = true
+		t.Outline = true
+		t.Color = K.White
+		t.Visible = false
+	end
 	o.Snap.Visible, o.Box.Visible, o.HpBg.Visible, o.HpFill.Visible, o.HpTxt.Visible = false, false, false, false, false
 	return o
 end
@@ -545,6 +573,7 @@ end
 local function hideObj(o)
 	o.Snap.Visible, o.Box.Visible = false, false
 	o.HpBg.Visible, o.HpFill.Visible, o.HpTxt.Visible = false, false, false
+	o.Name.Visible, o.Dist.Visible = false, false
 	hideBones(o)
 end
 local function killObj(o)
@@ -584,6 +613,7 @@ local function drawSkeleton(o, ch, yoff)
 				shown = true
 			end
 		end
+		line.Color = S.ColESP
 		line.Visible = shown
 	end
 	hideBones(o, #bones + 1)
@@ -591,7 +621,7 @@ end
 
 local function espStep()
 	if not draw then return end
-	if not (S.Line or S.Box or S.Skel or S.Health) then
+	if not (S.Line or S.Box or S.Skel or S.Health or S.ESPName or S.ESPDist) then
 		if espShown then
 			for _, o in pairs(ESP) do hideObj(o) end
 			espShown = false
@@ -611,6 +641,8 @@ local function espStep()
 			end
 			if o then
 				local vis = false
+				o.Snap.Color = S.ColESP
+				o.Box.Color = S.ColESP
 				if valid(p) then
 					local ch = charOf(p)
 					local root = rootOf(ch)
@@ -658,7 +690,18 @@ local function espStep()
 									o.HpBg.Visible, o.HpFill.Visible, o.HpTxt.Visible = false, false, false
 								end
 
-								if S.Skel then drawSkeleton(o, ch, yoff) else hideBones(o) end
+									if S.Skel then drawSkeleton(o, ch, yoff) else hideBones(o) end
+
+									o.Name.Visible = S.ESPName
+									if S.ESPName then
+										o.Name.Text = (p.DisplayName ~= "" and p.DisplayName) or p.Name
+										o.Name.Position = Vector2.new(cx, top - 16)
+									end
+									o.Dist.Visible = S.ESPDist
+									if S.ESPDist then
+										o.Dist.Text = string.format("[%dm]", math.floor((root.Position - myPos()).Magnitude))
+										o.Dist.Position = Vector2.new(cx, top + h + 2)
+									end
 							end
 						end
 					end
@@ -690,7 +733,7 @@ keep(RS.Heartbeat:Connect(function(dt)
 		return
 	end
 	speedWas = true
-	if S.Flying then return end
+	if S.Flying or S.FlyFree then return end
 
 	local ch = LP.Character
 	local h = ch and ch:FindFirstChildOfClass("Humanoid")
@@ -813,6 +856,7 @@ local function step(dt)
 	if fov then
 		local okk, e = pcall(function()
 			fov.Visible = S.ShowFOV
+			fov.Color = S.ColFOV
 			if S.ShowFOV then
 				fov.Position = Cam.ViewportSize / 2
 				fov.Radius = S.FOV
@@ -1062,7 +1106,7 @@ local function lootPromptsNow(range)
 			local txt = (pr.ActionText or "") .. " " .. (pr.ObjectText or "") .. " " .. pr.Name
 			if isLootText(txt) then
 				local pos = promptPos(pr)
-				if pos and (pos - r.Position).Magnitude <= math.min(range, pr.MaxActivationDistance + 3) then
+				if pos and (pos - r.Position).Magnitude <= range then
 					lootSeen[pr] = os.clock() + 1.5
 					pcall(function() pr.HoldDuration = 0 end)
 					local okk = false
@@ -1078,7 +1122,7 @@ local function lootPromptsNow(range)
 	return n
 end
 
-local function pressGui(btn)
+local function pressGui(btn, sx, sy)
 	local done = false
 	if firesignal then
 		pcall(function() firesignal(btn.MouseButton1Click) done = true end)
@@ -1092,10 +1136,13 @@ local function pressGui(btn)
 	end
 	if not done then
 		pcall(function()
-			local ap, asz = btn.AbsolutePosition, btn.AbsoluteSize
-			local x, y = ap.X + asz.X / 2, ap.Y + asz.Y / 2
-			local sg = btn:FindFirstAncestorOfClass("ScreenGui")
-			if sg and not sg.IgnoreGuiInset then y = y + GuiSvc:GetGuiInset().Y end
+			local x, y = sx, sy
+			if not x then
+				local ap, asz = btn.AbsolutePosition, btn.AbsoluteSize
+				x, y = ap.X + asz.X / 2, ap.Y + asz.Y / 2
+				local sg = btn:FindFirstAncestorOfClass("ScreenGui")
+				if sg and not sg.IgnoreGuiInset then y = y + GuiSvc:GetGuiInset().Y end
+			end
 			VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
 			task.wait(0.03)
 			VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
@@ -1113,6 +1160,7 @@ local function lootGuiNow(range)
 			and not d:IsDescendantOf(Gui) and (lootSeen[d] or 0) < os.clock() then
 			local btn = d:IsA("TextButton") and d or d:FindFirstAncestorWhichIsA("GuiButton") or d
 			local near = true
+			local sx, sy
 			local bb = d:FindFirstAncestorOfClass("BillboardGui")
 			if bb then
 				local ad = bb.Adornee
@@ -1120,11 +1168,15 @@ local function lootGuiNow(range)
 				if ad and ad:IsA("BasePart") then pos = ad.Position
 				elseif ad and ad:IsA("Attachment") then pos = ad.WorldPosition
 				elseif ad and ad:IsA("Model") then local rr = rootOf(ad) pos = rr and rr.Position end
-				near = (not bb.Enabled) == false and (pos == nil or (pos - r.Position).Magnitude <= range)
+				near = bb.Enabled and (pos == nil or (pos - r.Position).Magnitude <= range)
+				if pos then
+					local v3, on = Cam:WorldToViewportPoint(pos)
+					if on then sx, sy = v3.X, v3.Y end
+				end
 			end
 			if near and btn:IsA("GuiButton") then
 				lootSeen[d] = os.clock() + 1.5
-				pressGui(btn)
+				pressGui(btn, sx, sy)
 				n = n + 1
 			end
 		end
@@ -1138,13 +1190,13 @@ end
 
 task.spawn(function()
 	while Gui.Parent do
-		if S.AutoLoot and not S.AutoFarm then pcall(lootNow, 14) end
+		if S.AutoLoot and not S.AutoFarm then pcall(lootNow, S.LootRange) end
 		task.wait(0.8)
 	end
 end)
 
 -- ==========================================
--- AUTO FARM: anda até o NPC, atira, mata, vai até o corpo e saqueia
+-- AUTO FARM (parado): mira no NPC mais perto, aperta o botão de tiro da tela e saqueia
 -- ==========================================
 local badTool = {"fist", "punho", "soco", "murro", "punch", "medkit", "kit", "bandag", "heal", "carro", "vehicle", "veiculo", "knife", "faca"}
 
@@ -1180,58 +1232,135 @@ local function pickGun()
 	return nil
 end
 
+-- acha o botão redondo de tiro (a bala, embaixo à direita); se não achar usa a posição dele na tela
+local fireBtn, fireBtnAt = nil, 0
+local function findFireBtn()
+	if fireBtn and fireBtn.Parent and os.clock() - fireBtnAt < 5 then return fireBtn end
+	fireBtnAt, fireBtn = os.clock(), nil
+	local pg = LP:FindFirstChildOfClass("PlayerGui")
+	if not pg then return end
+	local vs = Cam.ViewportSize
+	local best, bs = nil, math.huge
+	for _, d in ipairs(pg:GetDescendants()) do
+		if d:IsA("GuiButton") and d.Visible and not d:IsDescendantOf(Gui) then
+			local sz = d.AbsoluteSize
+			if sz.X > vs.X * 0.04 and sz.X < vs.X * 0.16 then
+				local c = d.AbsolutePosition + sz / 2
+				local dx, dy = c.X / vs.X - 0.8415, c.Y / vs.Y - 0.659
+				local dd = dx * dx + dy * dy
+				if dd < bs then best, bs = d, dd end
+			end
+		end
+	end
+	if best and bs < 0.0016 then fireBtn = best end
+	return fireBtn
+end
+
 local function shoot(tool)
-	pcall(function() tool:Activate() end)
-	if mouse1click then pcall(mouse1click) end
+	local b = findFireBtn()
+	local x, y
+	if b then
+		local ap, sz = b.AbsolutePosition, b.AbsoluteSize
+		x, y = ap.X + sz.X / 2, ap.Y + sz.Y / 2
+		local sg = b:FindFirstAncestorOfClass("ScreenGui")
+		if sg and not sg.IgnoreGuiInset then y = y + GuiSvc:GetGuiInset().Y end
+		if firesignal then
+			pcall(function() firesignal(b.MouseButton1Down) end)
+			pcall(function() firesignal(b.Activated) end)
+		end
+	else
+		local vs = Cam.ViewportSize
+		x, y = vs.X * 0.8415, vs.Y * 0.659
+	end
+	local okk = pcall(function()
+		VIM:SendTouchEvent(7, 0, x, y)
+		task.wait(0.03)
+		VIM:SendTouchEvent(7, 2, x, y)
+	end)
+	if not okk then
+		pcall(function()
+			VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+			task.wait(0.02)
+			VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+		end)
+	end
+	if tool then pcall(function() tool:Activate() end) end
 end
 
 task.spawn(function()
-	local cur, lastPos, lootPos, lootStart
+	local nextLoot = 0
 	while Gui.Parent do
-		local wait = 0.15
-		if S.AutoFarm and not S.Flying then
+		local wait = 0.12
+		if S.AutoFarm and not S.Flying and not S.FlyFree then
 			local okk, e = pcall(function()
 				local r, h = myRoot(), myHum()
 				if not r or not h or h.Health <= 0 then wait = 0.5 return end
 
-				-- o alvo anterior morreu? então vai saquear
-				if cur then
-					local ch = npcs[cur]
-					if not cur.Parent or not ch or ch.Health <= 0 then
-						lootPos, lootStart = lastPos, os.clock()
-						cur = nil
-					end
+				-- saqueia o que estiver perto (a cada 0.7s)
+				if os.clock() >= nextLoot then
+					nextLoot = os.clock() + 0.7
+					lootNow(S.LootRange)
 				end
 
-				if lootPos then
-					if (lootPos - r.Position).Magnitude > 6 then h:MoveTo(lootPos) end
-					if lootNow(14) > 0 or os.clock() - lootStart > 5 then lootPos = nil end
-					wait = 0.25
-					return
-				end
-
-				local m = pickNpc()
-				if not m then wait = 0.4 return end
-				local tr = rootOf(m)
-				if not tr then return end
-				cur, lastPos = m, tr.Position
-
-				local dist = (tr.Position - r.Position).Magnitude
-				if dist > S.FarmRange then
-					h:MoveTo(tr.Position)
-				else
-					h:MoveTo(r.Position)
-				end
-				if dist <= S.FarmRange + 10 then
-					local tool = pickGun()
-					if tool then shoot(tool) end
-				end
+				if not pickNpc() then wait = 0.3 return end
+				shoot(pickGun())
 			end)
 			if not okk then fail("autofarm", e) end
 		end
 		task.wait(wait)
 	end
 end)
+
+-- ==========================================
+-- VOO LIVRE + ATRAVESSAR PAREDES
+-- Joystick move; para onde a câmera olha (cima/baixo) define a altura.
+-- ==========================================
+local ffWas = false
+keep(RS.Heartbeat:Connect(function(dt)
+	local ch = LP.Character
+	local h = ch and ch:FindFirstChildOfClass("Humanoid")
+	local r = ch and ch:FindFirstChild("HumanoidRootPart")
+	if not S.FlyFree or not h or not r or h.Health <= 0 then
+		if ffWas then
+			ffWas = false
+			if h then h.PlatformStand = false end
+		end
+		return
+	end
+	ffWas = true
+	h.PlatformStand = true
+	local cf = Cam.CFrame
+	local mv = h.MoveDirection
+	local vel = Vector3.zero
+	if mv.Magnitude > 0.05 then
+		local flat = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
+		flat = flat.Magnitude > 0.01 and flat.Unit or Vector3.new(0, 0, -1)
+		local right = flat:Cross(Vector3.yAxis)
+		vel = cf.LookVector * mv:Dot(flat) + cf.RightVector * mv:Dot(right)
+	end
+	r.CFrame = r.CFrame + vel * S.FlyFreeSpeed * dt
+	r.AssemblyLinearVelocity = Vector3.zero
+	r.AssemblyAngularVelocity = Vector3.zero
+end))
+
+local ncParts = {}
+keep(RS.Stepped:Connect(function()
+	local ch = LP.Character
+	if not ch then return end
+	if S.Noclip or S.FlyFree then
+		for _, d in ipairs(ch:GetChildren()) do
+			if d:IsA("BasePart") and d.CanCollide then
+				d.CanCollide = false
+				ncParts[d] = true
+			end
+		end
+	else
+		for d in pairs(ncParts) do
+			if d.Parent then d.CanCollide = true end
+			ncParts[d] = nil
+		end
+	end
+end))
 
 -- ==========================================
 -- PAINEL (tema vermelho)
@@ -1478,6 +1607,125 @@ local function buildPanel()
 		end))
 	end
 
+	-- seletor de cor: quadrado (cor/brilho) + barra de matiz, com bolhas para arrastar
+	local function bindDrag(hit, pg, fn)
+		local active
+		hit.InputBegan:Connect(function(i)
+			if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
+				active = i
+				pg.ScrollingEnabled = false
+				fn(i.Position)
+			end
+		end)
+		keep(UIS.InputChanged:Connect(function(i)
+			if active and (i.UserInputType == Enum.UserInputType.MouseMovement
+				or (i.UserInputType == Enum.UserInputType.Touch and i == active)) then
+				fn(i.Position)
+			end
+		end))
+		keep(UIS.InputEnded:Connect(function(i)
+			if active and (i == active or i.UserInputType == Enum.UserInputType.MouseButton1) then
+				active = nil
+				pg.ScrollingEnabled = true
+			end
+		end))
+	end
+
+	-- roda de cores única (igual ao exemplo): muda a cor de TODOS os ESP e do FOV
+	local function ColorWheel(pg)
+		local D, R = 112, 56
+		local r = Card(pg, 160)
+		local h, sat, val = S.ColESP:ToHSV()
+		val = math.max(val, 0.1)
+
+		-- roda
+		local wheel = Corner(New("Frame", {Position = UDim2.new(0, 12, 0, 10), Size = UDim2.new(0, D, 0, D),
+			BackgroundColor3 = K.White, BorderSizePixel = 0, ClipsDescendants = true}, r), R)
+		local N = 72
+		for i = 0, N - 1 do
+			local bar = New("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 0),
+				Size = UDim2.new(0, 8, 0, D), BackgroundColor3 = K.White, BorderSizePixel = 0, Rotation = i * 360 / N}, wheel)
+			New("UIGradient", {Rotation = 90,
+				Color = ColorSequence.new({
+					ColorSequenceKeypoint.new(0, Color3.fromHSV(i / N, 1, 1)),
+					ColorSequenceKeypoint.new(0.5, K.White),
+					ColorSequenceKeypoint.new(1, K.White)}),
+				Transparency = NumberSequence.new({
+					NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(0.5, 0),
+					NumberSequenceKeypoint.new(0.502, 1), NumberSequenceKeypoint.new(1, 1)})}, bar)
+		end
+		-- escurece a roda conforme o brilho
+		local dim = Corner(New("Frame", {Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = Color3.new(0, 0, 0),
+			BackgroundTransparency = 0, BorderSizePixel = 0}, wheel), R)
+		local ring = Stroke(wheel, K.Dim, 2, 0.4)
+
+		local knob = Corner(New("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.new(0, 18, 0, 18),
+			BackgroundColor3 = K.White, BorderSizePixel = 0, ZIndex = 4}, wheel), 9)
+		Stroke(knob, K.White, 2, 0)
+
+		-- barra de brilho (preto -> branco)
+		local bt = Corner(New("Frame", {Position = UDim2.new(0, 12, 0, 134), Size = UDim2.new(0, D, 0, 12),
+			BackgroundColor3 = K.White, BorderSizePixel = 0}, r), 6)
+		New("UIGradient", {Color = ColorSequence.new(Color3.new(0, 0, 0), K.White)}, bt)
+		Stroke(bt, K.Dim, 1, 0.5)
+		local bk = Corner(New("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), Size = UDim2.new(0, 14, 0, 20),
+			BackgroundColor3 = K.White, BorderSizePixel = 0, ZIndex = 3}, bt), 5)
+		Stroke(bk, K.Red, 2, 0)
+
+		-- cores prontas (3x3)
+		local presets = {
+			Color3.fromRGB(240, 198, 120), Color3.fromRGB(140, 82, 255), Color3.fromRGB(255, 90, 0),
+			Color3.fromRGB(140, 58, 64), Color3.fromRGB(0, 230, 255), Color3.fromRGB(90, 255, 20),
+			Color3.fromRGB(255, 160, 208), Color3.fromRGB(150, 160, 155), Color3.fromRGB(245, 255, 250),
+		}
+		local prev = Corner(New("Frame", {AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 10), Size = UDim2.new(0, 36, 0, 14),
+			BackgroundColor3 = S.ColESP, BorderSizePixel = 0}, r), 7)
+		Stroke(prev, K.White, 1, 0.6)
+
+		local function apply()
+			local c = Color3.fromHSV(h, sat, val)
+			S.ColESP, S.ColFOV = c, c
+			prev.BackgroundColor3 = c
+			dim.BackgroundTransparency = val
+			local ang = h * math.pi * 2
+			knob.Position = UDim2.new(0.5, math.sin(ang) * sat * R, 0.5, -math.cos(ang) * sat * R)
+			knob.BackgroundColor3 = c
+			bk.Position = UDim2.new((val - 0.1) / 0.9, 0, 0.5, 0)
+		end
+		apply()
+
+		for i, c in ipairs(presets) do
+			local col, row = (i - 1) % 3, math.floor((i - 1) / 3)
+			local sb = Corner(New("TextButton", {Position = UDim2.new(0, 152 + col * 46, 0, 32 + row * 40), Size = UDim2.new(0, 36, 0, 36),
+				BackgroundColor3 = c, Text = "", AutoButtonColor = false, BorderSizePixel = 0}, r), 18)
+			Stroke(sb, K.Dim, 2, 0.3)
+			sb.MouseButton1Click:Connect(function()
+				h, sat, val = c:ToHSV()
+				val = math.max(val, 0.1)
+				apply()
+			end)
+		end
+
+		local hit = New("TextButton", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "", AutoButtonColor = false,
+			ZIndex = 6}, wheel)
+		bindDrag(hit, pg, function(pos)
+			local ctr = wheel.AbsolutePosition + wheel.AbsoluteSize / 2
+			local dx, dy = pos.X - ctr.X, pos.Y - ctr.Y
+			local rad = math.max(wheel.AbsoluteSize.X / 2, 1)
+			sat = math.clamp(math.sqrt(dx * dx + dy * dy) / rad, 0, 1)
+			h = (math.atan2(dx, -dy) / (math.pi * 2)) % 1
+			apply()
+		end)
+
+		local bhit = New("TextButton", {Position = UDim2.new(0, -6, 0, -8), Size = UDim2.new(1, 12, 1, 16), BackgroundTransparency = 1,
+			Text = "", AutoButtonColor = false, ZIndex = 6}, bt)
+		bindDrag(bhit, pg, function(pos)
+			local f = math.clamp((pos.X - bt.AbsolutePosition.X) / math.max(bt.AbsoluteSize.X, 1), 0, 1)
+			val = 0.1 + f * 0.9
+			apply()
+		end)
+	end
+
 	-- conteudo das abas ------------------------------------------
 	local pMira, pEsp, pSpd = pages.MIRA, pages.ESP, pages.SPEED
 
@@ -1501,24 +1749,32 @@ local function buildPanel()
 	Switch(pEsp, "ESP Caixa", "Quadrado em volta do jogador", "Box")
 	Switch(pEsp, "ESP Esqueleto", "Desenha os ossos do jogador", "Skel")
 	Switch(pEsp, "ESP Vida", "Barra e número da vida", "Health")
+	Switch(pEsp, "ESP Nome", "Nome em cima da caixa", "ESPName")
+	Switch(pEsp, "ESP Distância", "Distância embaixo da caixa", "ESPDist")
 	Head(pEsp, "AJUSTE")
 	Slide(pEsp, "Ajuste vertical", -60, 60, "ESPOffset")
+	Head(pEsp, "COR DO ESP E DO FOV")
+	ColorWheel(pEsp)
 
 	Head(pSpd, "CORRIDA")
 	Switch(pSpd, "Ativar speed", "Aumenta a velocidade mesmo se o jogo travar", "SpeedOn")
 	Slide(pSpd, "Velocidade (recomendado 30)", 16, 60, "Speed")
+	Head(pSpd, "VOO LIVRE")
+	Switch(pSpd, "Voar", "Joystick move, câmera define subir/descer", "FlyFree")
+	Slide(pSpd, "Velocidade do voo livre", 15, 80, "FlyFreeSpeed")
+	Switch(pSpd, "Atravessar paredes", "Noclip", "Noclip")
 	Head(pSpd, "STAMINA")
 	Switch(pSpd, "Stamina infinita", "Corre rápido sem cansar (procura a stamina do jogo)", "InfStamina")
 
 	local pFarm = pages.FARM
 	Head(pFarm, "AUTO FARM")
-	Switch(pFarm, "Auto farm", "Anda até o NPC, atira, mata e saqueia sozinho", "AutoFarm")
+	Switch(pFarm, "Auto farm", "Fica parado: atira nos NPCs perto e saqueia", "AutoFarm")
 	Switch(pFarm, "Saque automático", "Aperta \"saquear\" quando estiver perto de um corpo", "AutoLoot")
 	Action(pFarm, "Saquear agora", "Saqueia o que estiver perto de você", "SAQUEAR", function(b)
 		local n = lootNow(16)
 		note(n > 0 and "Saqueando..." or "Nada para saquear aqui perto.")
 	end)
-	Slide(pFarm, "Distância de tiro (studs)", 10, 80, "FarmRange")
+	Slide(pFarm, "Distância do saque (studs)", 8, 60, "LootRange")
 	Input(pFarm, "Nome da arma (opcional)", "ex: M4", "GunName")
 	Head(pFarm, "NPCS")
 	Switch(pFarm, "Aimbot NPC (farm)", "Gruda no NPC mais perto (pausa o aimbot de jogadores)", "NPCAim")
@@ -1695,6 +1951,8 @@ Gui.Destroying:Connect(function()
 	for part in pairs(headOrig) do restoreHead(part) end
 	pcall(restoreSpread)
 	pcall(stopFly)
+	S.FlyFree, S.AutoFarm, S.Noclip = false, false, false
+	pcall(function() local hh = myHum() if hh then hh.PlatformStand = false end end)
 	for _, o in pairs(ESP) do killObj(o) end
 	if fov then pcall(function() fov:Remove() end) end
 	local h = myHum()
