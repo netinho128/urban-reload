@@ -15,8 +15,9 @@ local WS = game:GetService("Workspace")
 local LP = Players.LocalPlayer
 local Cam = WS.CurrentCamera
 
-local IMG = "rbxassetid://71668099351887"
+local IMG = "rbxassetid://73781693639947"
 local NAME = "NetrixUrbanReloadV2"
+local DISCORD_LINK = "https://discord.gg/yQyvXYM2CK"
 
 local K = {
 	Bg1 = Color3.fromRGB(24, 9, 13),
@@ -36,7 +37,7 @@ local FH, FB, FM = Enum.Font.GothamBlack, Enum.Font.GothamBold, Enum.Font.Gotham
 -- CONFIGURACAO
 -- ==========================================
 local S = {
-	Aim = false, HS = 100, FOV = 140, ShowFOV = false, IgnoreTeam = false,
+	Aim = false, HS = 100, FOV = 140, MaxDist = 120, ShowFOV = false, IgnoreTeam = false,
 	Line = false, Box = false, Skel = false, Health = false, ESPOffset = 0,
 	SpeedOn = false, Speed = 32,
 }
@@ -193,18 +194,40 @@ end
 
 local function refPart(ch) return ch:FindFirstChild("Head") or rootOf(ch) end
 
+-- posição de quem joga (usada para medir a distância até os alvos)
+local function myPos()
+	local ch = LP.Character
+	local r = ch and rootOf(ch)
+	return r and r.Position or Cam.CFrame.Position
+end
+
+-- Só pega quem está dentro do FOV E dentro da distância máxima.
+-- Entre os que servem, escolhe o MAIS PERTO de você (não o mais perto da mira),
+-- assim o aimbot não gruda em quem está lá longe.
 local function pickTarget(c0)
+	local me = myPos()
+
 	if lockP and valid(lockP) then
-		local ref = refPart(charOf(lockP))
+		local ch = charOf(lockP)
+		local ref, r = refPart(ch), rootOf(ch)
 		local d = ref and screenDist(ref, c0)
-		if d and d <= S.FOV * 1.3 then return lockP end
+		if d and d <= S.FOV * 1.3 and (r.Position - me).Magnitude <= S.MaxDist * 1.1 then
+			return lockP
+		end
 	end
-	local best, bd = nil, S.FOV
+
+	local best, bestDist = nil, math.huge
 	for _, p in ipairs(Players:GetPlayers()) do
 		if valid(p) then
-			local ref = refPart(charOf(p))
+			local ch = charOf(p)
+			local ref, r = refPart(ch), rootOf(ch)
 			local d = ref and screenDist(ref, c0)
-			if d and d < bd then best, bd = p, d end
+			if d and d <= S.FOV then
+				local dist = (r.Position - me).Magnitude
+				if dist <= S.MaxDist and dist < bestDist then
+					best, bestDist = p, dist
+				end
+			end
 		end
 	end
 	if best then lockHead, lockT = roll(), os.clock() end
@@ -527,7 +550,7 @@ local function buildPanel()
 	New("UIGradient", {Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1)})}, hl)
 
 	-- abas em formato de pilula
-	local names = {"MIRA", "ESP", "SPEED"}
+	local names = {"MIRA", "ESP", "SPEED", "DISCORD"}
 	local gap = 6
 	local chipW = (MW - 24 - gap * (#names - 1)) / #names
 	for i, n in ipairs(names) do
@@ -592,27 +615,59 @@ local function buildPanel()
 		end)
 	end
 
-	local function Seg(pg, title, opts, key)
-		local r = Card(pg, 62)
-		Lbl(r, title, UDim2.new(0, 12, 0, 6), UDim2.new(1, -24, 0, 18), FB, 12, K.Txt)
-		local holder = New("Frame", {Position = UDim2.new(0, 12, 0, 30), Size = UDim2.new(1, -24, 0, 26), BackgroundTransparency = 1}, r)
-		local btns, n = {}, #opts
-		local function pick(i)
-			for idx, b in ipairs(btns) do
-				local on = (idx == i)
-				tween(b, {BackgroundColor3 = on and K.Red or K.Bg2})
+	local function Dropdown(pg, title, opts, key)
+		local r, s = Card(pg, 46)
+		r.ClipsDescendants = true
+		Lbl(r, title, UDim2.new(0, 12, 0, 0), UDim2.new(1, -140, 0, 46), FB, 12, K.Txt)
+
+		local head = Corner(New("TextButton", {AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 9), Size = UDim2.new(0, 112, 0, 28),
+			BackgroundColor3 = K.Bg2, Text = "", AutoButtonColor = false, BorderSizePixel = 0, ZIndex = 5}, r), 8)
+		Stroke(head, K.Red, 1, 0.5)
+		local cur = Lbl(head, "", UDim2.new(0, 10, 0, 0), UDim2.new(1, -30, 1, 0), FB, 11, K.Txt)
+		cur.ZIndex = 6
+
+		-- setinha (dois tracos em V) que gira ao abrir
+		local arrow = New("Frame", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -9, 0.5, 0), Size = UDim2.new(0, 12, 0, 12),
+			BackgroundTransparency = 1, ZIndex = 6}, head)
+		for _, d in ipairs({{40, 3.5}, {-40, 8.5}}) do
+			Corner(New("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, d[2], 0.5, 1), Size = UDim2.new(0, 7, 0, 2),
+				BackgroundColor3 = K.Red2, BorderSizePixel = 0, Rotation = d[1], ZIndex = 6}, arrow), 1)
+		end
+
+		local n = #opts
+		local optBtns = {}
+		local openState = false
+		local setOpen
+
+		local function refresh()
+			for i, b in ipairs(optBtns) do
+				local on = (opts[i][2] == S[key])
+				b.BackgroundColor3 = on and K.Red or K.Bg2
 				b.TextColor3 = on and K.White or K.Dim
+				if on then cur.Text = opts[i][1] end
 			end
-			S[key] = opts[i][2]
 		end
+
 		for i, o in ipairs(opts) do
-			local b = Corner(New("TextButton", {Size = UDim2.new(1 / n, -5, 1, 0), Position = UDim2.new((i - 1) / n, 0, 0, 0),
+			local b = Corner(New("TextButton", {Position = UDim2.new(0, 10, 0, 50 + (i - 1) * 30), Size = UDim2.new(1, -20, 0, 26),
 				BackgroundColor3 = K.Bg2, Text = o[1], Font = FB, TextSize = 11, TextColor3 = K.Dim, AutoButtonColor = false,
-				BorderSizePixel = 0}, holder), 7)
-			b.MouseButton1Click:Connect(function() pick(i) end)
-			btns[i] = b
-			if o[2] == S[key] then pick(i) end
+				BorderSizePixel = 0}, r), 7)
+			b.MouseButton1Click:Connect(function()
+				S[key] = o[2]
+				refresh()
+				setOpen(false)
+			end)
+			optBtns[i] = b
 		end
+
+		setOpen = function(v)
+			openState = v
+			tween(r, {Size = UDim2.new(1, 0, 0, v and (50 + n * 30 + 2) or 46)})
+			tween(arrow, {Rotation = v and 180 or 0})
+		end
+
+		head.MouseButton1Click:Connect(function() setOpen(not openState) end)
+		refresh()
 	end
 
 	local function Slide(pg, title, mn, mx, key)
@@ -668,11 +723,13 @@ local function buildPanel()
 
 	Head(pMira, "AIMBOT")
 	Switch(pMira, "Ativar aimbot", "Gruda a mira no inimigo mais próximo", "Aim")
-	Seg(pMira, "Chance de headshot", {{"100 HS", 100}, {"70 HS", 70}, {"50 HS", 50}}, "HS")
+	Dropdown(pMira, "Chance de headshot", {{"100% HS", 100}, {"70% HS", 70}, {"50% HS", 50}, {"30% HS", 30}}, "HS")
 	Switch(pMira, "Ignorar time", "Vale para a mira e para o ESP", "IgnoreTeam")
 	Head(pMira, "ALCANCE")
 	Switch(pMira, "Mostrar círculo do FOV", "Área onde o aimbot procura alvos", "ShowFOV")
 	Slide(pMira, "Tamanho do FOV", 40, 400, "FOV")
+	Head(pMira, "DISTÂNCIA")
+	Slide(pMira, "Distância máxima (studs)", 20, 500, "MaxDist")
 
 	Head(pEsp, "DESENHOS")
 	Switch(pEsp, "ESP Line", "Linha do topo da tela até o jogador", "Line")
@@ -685,6 +742,40 @@ local function buildPanel()
 	Head(pSpd, "CORRIDA")
 	Switch(pSpd, "Ativar speed", "Velocidade personalizada", "SpeedOn")
 	Slide(pSpd, "Velocidade", 16, 120, "Speed")
+
+	local pDc = pages.DISCORD
+	Head(pDc, "COMUNIDADE")
+
+	local banner, bs = Card(pDc, 122)
+	banner.ClipsDescendants = true
+	banner.BackgroundColor3 = K.White
+	New("UIGradient", {Rotation = 20, Color = ColorSequence.new(Color3.fromRGB(86, 16, 32), Color3.fromRGB(22, 12, 17))}, banner)
+	local dlogo = Corner(New("ImageLabel", {Size = UDim2.new(0, 64, 0, 64), Position = UDim2.new(0, 14, 0, 12), BackgroundColor3 = K.Bg2,
+		Image = IMG, ScaleType = Enum.ScaleType.Crop, BorderSizePixel = 0}, banner), 16)
+	Stroke(dlogo, K.Red2, 2, 0.1)
+	Lbl(banner, "Entre no nosso Discord!", UDim2.new(0, 90, 0, 14), UDim2.new(1, -100, 0, 20), FH, 14, K.Txt)
+	local dsub = Lbl(banner, "Novidades, atualizações e suporte do NETRIX HUB. Toque no botão para copiar o link.", UDim2.new(0, 90, 0, 36),
+		UDim2.new(1, -100, 0, 42), FM, 10, K.Dim)
+	dsub.TextWrapped = true
+	dsub.TextYAlignment = Enum.TextYAlignment.Top
+
+	local copyBtn = Corner(New("TextButton", {Position = UDim2.new(0, 14, 1, -38), Size = UDim2.new(1, -28, 0, 28), BackgroundColor3 = K.White,
+		Text = "COPIAR LINK DO DISCORD", Font = FH, TextSize = 12, TextColor3 = K.White, AutoButtonColor = false, BorderSizePixel = 0,
+		ZIndex = 5}, banner), 9)
+	New("UIGradient", {Rotation = 0, Color = ColorSequence.new(K.DarkRed, K.Red2)}, copyBtn)
+	copyBtn.MouseButton1Click:Connect(function()
+		local copied = false
+		local copy = setclipboard or toclipboard
+		if copy then copied = pcall(copy, DISCORD_LINK) end
+		copyBtn.Text = copied and "LINK COPIADO!" or "SEM ACESSO À ÁREA DE TRANSFERÊNCIA"
+		note(copied and "Link do Discord copiado! Cole no navegador para entrar." or DISCORD_LINK)
+		task.delay(2, function()
+			pcall(function() copyBtn.Text = "COPIAR LINK DO DISCORD" end)
+		end)
+	end)
+
+	local linkRow = Card(pDc, 34)
+	Lbl(linkRow, "discord.gg/yQyvXYM2CK", UDim2.new(0, 12, 0, 0), UDim2.new(1, -24, 1, 0), FB, 12, K.Red2, Enum.TextXAlignment.Center)
 
 	showTab("MIRA")
 
