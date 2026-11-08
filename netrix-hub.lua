@@ -39,10 +39,11 @@ local FH, FB, FM = Enum.Font.GothamBlack, Enum.Font.GothamBold, Enum.Font.Gotham
 local S = {
 	Aim = false, HS = 100, FOV = 140, MaxDist = 120, ShowFOV = false, IgnoreTeam = false,
 	Line = false, Box = false, Skel = false, Health = false, ESPOffset = 0,
-	SpeedOn = false, Speed = 32,
+	SpeedOn = false, Speed = 30,
 	NoSpread = false, BigHead = false, HeadSize = 4,
 	NPCAim = false, NPCHead = false, NPCDist = 120, NPCName = "",
-	Dest = "farm", FlySpeed = 60, Flying = false, InfStamina = false,
+	Dest = "farm", FlySpeed = 40, Flying = false, InfStamina = false,
+	Travel = "walk", AutoFarm = false, AutoLoot = false, FarmRange = 30, GunName = "",
 }
 
 local draw = false
@@ -820,7 +821,7 @@ local function step(dt)
 		if not okk then fail("fov", e) end
 	end
 
-	if S.NPCAim then
+	if S.NPCAim or S.AutoFarm then
 		local okk, e = pcall(aimNpc, dt)
 		if not okk then fail("npc", e) end
 	elseif S.Aim then
@@ -848,7 +849,7 @@ local DEST = {
 	farm = {label = "Farm Zone", names = {"farmzone", "farmarea", "zonafarm", "areafarm"}},
 	gun = {label = "Gun Shop", names = {"gunshop", "gunstore", "weaponshop", "weaponstore", "armory", "armoury", "lojadearmas"}},
 	equip = {label = "Equipamentos", names = {"equipmentshop", "equipshop", "equipmentstore", "gearshop", "gearstore",
-		"supplyshop", "itemshop", "lojadeequipamentos", "shop", "store"}},
+		"supplyshop", "itemshop", "lojadeequipamentos"}},
 }
 local marks = {} -- lugares que você marcou: marks.farm = Vector3
 
@@ -911,9 +912,10 @@ local function flyTo(dest, label)
 	local token = flyToken
 	S.Flying = true
 
-	local cruise = math.max(r.Position.Y, dest.Y) + 45
+	local cruise = math.max(r.Position.Y, dest.Y) + 20
 	local goal = dest + Vector3.new(0, 4, 0)
 	local phase = 1
+	local expected
 	local conn, clipConn
 
 	local function finish(msg)
@@ -942,6 +944,10 @@ local function flyTo(dest, label)
 		if not root or not h or h.Health <= 0 then finish("Voo cancelado.") return end
 
 		local pos = root.Position
+		if expected and (pos - expected).Magnitude > 30 then
+			finish("O jogo puxou você de volta. Use o modo ANDAR (seguro).")
+			return
+		end
 		local target
 		if phase == 1 then
 			target = Vector3.new(pos.X, cruise, pos.Z)
@@ -962,8 +968,270 @@ local function flyTo(dest, label)
 		end
 		root.AssemblyLinearVelocity = Vector3.zero
 		root.AssemblyAngularVelocity = Vector3.zero
+		expected = root.Position
 	end)
 end
+
+-- ==========================================
+-- ANDAR ATÉ O DESTINO (caminho de verdade, o jogo não puxa de volta)
+-- ==========================================
+local function validPos(v)
+	return v and v.X == v.X and v.Y == v.Y and v.Z == v.Z and v.Magnitude < 20000
+end
+
+local function walkTo(dest, label)
+	local r, h = myRoot(), myHum()
+	if not r or not h then note("Personagem não encontrado.") return end
+	stopFly()
+	local token = flyToken
+	S.Flying = true
+	task.spawn(function()
+		local wps
+		pcall(function()
+			local path = game:GetService("PathfindingService"):CreatePath({AgentRadius = 2, AgentHeight = 5, AgentCanJump = true})
+			path:ComputeAsync(r.Position, dest)
+			if path.Status == Enum.PathStatus.Success then wps = path:GetWaypoints() end
+		end)
+		if not wps then wps = {{Position = dest, Action = Enum.PathWaypointAction.Walk}} end
+
+		for _, wp in ipairs(wps) do
+			if token ~= flyToken then return end
+			local hh = myHum()
+			if not hh or hh.Health <= 0 then break end
+			if wp.Action == Enum.PathWaypointAction.Jump then hh.Jump = true end
+			hh:MoveTo(wp.Position)
+			local t0 = os.clock()
+			while token == flyToken and os.clock() - t0 < 6 do
+				local rr = myRoot()
+				if not rr then break end
+				local a = Vector3.new(rr.Position.X, 0, rr.Position.Z)
+				local b = Vector3.new(wp.Position.X, 0, wp.Position.Z)
+				if (a - b).Magnitude <= 4 then break end
+				task.wait(0.1)
+			end
+		end
+		if token == flyToken then
+			stopFly()
+			note("Chegou em " .. label .. "!")
+		end
+	end)
+end
+
+-- ==========================================
+-- SAQUEAR ("Toque aqui para saquear")
+-- Aperta sozinho o prompt/botão de saquear que estiver perto de você.
+-- ==========================================
+local VIM = game:GetService("VirtualInputManager")
+local GuiSvc = game:GetService("GuiService")
+local lootPrompts = {}
+local lootSeen = setmetatable({}, {__mode = "k"})
+
+local function isLootText(t)
+	t = string.lower(t or "")
+	return string.find(t, "saque", 1, true) ~= nil or string.find(t, "loot", 1, true) ~= nil
+end
+
+task.spawn(function()
+	local n = 0
+	for _, d in ipairs(WS:GetDescendants()) do
+		if d:IsA("ProximityPrompt") then lootPrompts[d] = true end
+		n = n + 1
+		if n % 3000 == 0 then task.wait() end
+	end
+end)
+keep(WS.DescendantAdded:Connect(function(d)
+	if d:IsA("ProximityPrompt") then lootPrompts[d] = true end
+end))
+keep(WS.DescendantRemoving:Connect(function(d) lootPrompts[d] = nil end))
+
+local function promptPos(pr)
+	local par = pr.Parent
+	if par and par:IsA("Attachment") then return par.WorldPosition end
+	if par and par:IsA("BasePart") then return par.Position end
+	local m = par and par:FindFirstAncestorOfClass("Model")
+	local rr = m and rootOf(m)
+	return rr and rr.Position
+end
+
+local function lootPromptsNow(range)
+	local r = myRoot()
+	if not r then return 0 end
+	local n = 0
+	for pr in pairs(lootPrompts) do
+		if pr.Parent and pr.Enabled and (lootSeen[pr] or 0) < os.clock() then
+			local txt = (pr.ActionText or "") .. " " .. (pr.ObjectText or "") .. " " .. pr.Name
+			if isLootText(txt) then
+				local pos = promptPos(pr)
+				if pos and (pos - r.Position).Magnitude <= math.min(range, pr.MaxActivationDistance + 3) then
+					lootSeen[pr] = os.clock() + 1.5
+					pcall(function() pr.HoldDuration = 0 end)
+					local okk = false
+					if fireproximityprompt then okk = pcall(fireproximityprompt, pr) end
+					if not okk then
+						pcall(function() pr:InputHoldBegin() task.wait(0.05) pr:InputHoldEnd() end)
+					end
+					n = n + 1
+				end
+			end
+		end
+	end
+	return n
+end
+
+local function pressGui(btn)
+	local done = false
+	if firesignal then
+		pcall(function() firesignal(btn.MouseButton1Click) done = true end)
+		pcall(function() firesignal(btn.Activated) done = true end)
+	end
+	if not done and getconnections then
+		pcall(function()
+			for _, c in ipairs(getconnections(btn.MouseButton1Click)) do c:Fire() end
+			done = true
+		end)
+	end
+	if not done then
+		pcall(function()
+			local ap, asz = btn.AbsolutePosition, btn.AbsoluteSize
+			local x, y = ap.X + asz.X / 2, ap.Y + asz.Y / 2
+			local sg = btn:FindFirstAncestorOfClass("ScreenGui")
+			if sg and not sg.IgnoreGuiInset then y = y + GuiSvc:GetGuiInset().Y end
+			VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
+			task.wait(0.03)
+			VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
+		end)
+	end
+end
+
+local function lootGuiNow(range)
+	local pg = LP:FindFirstChildOfClass("PlayerGui")
+	local r = myRoot()
+	if not pg or not r then return 0 end
+	local n = 0
+	for _, d in ipairs(pg:GetDescendants()) do
+		if (d:IsA("TextButton") or d:IsA("TextLabel")) and d.Visible and isLootText(d.Text)
+			and not d:IsDescendantOf(Gui) and (lootSeen[d] or 0) < os.clock() then
+			local btn = d:IsA("TextButton") and d or d:FindFirstAncestorWhichIsA("GuiButton") or d
+			local near = true
+			local bb = d:FindFirstAncestorOfClass("BillboardGui")
+			if bb then
+				local ad = bb.Adornee
+				local pos
+				if ad and ad:IsA("BasePart") then pos = ad.Position
+				elseif ad and ad:IsA("Attachment") then pos = ad.WorldPosition
+				elseif ad and ad:IsA("Model") then local rr = rootOf(ad) pos = rr and rr.Position end
+				near = (not bb.Enabled) == false and (pos == nil or (pos - r.Position).Magnitude <= range)
+			end
+			if near and btn:IsA("GuiButton") then
+				lootSeen[d] = os.clock() + 1.5
+				pressGui(btn)
+				n = n + 1
+			end
+		end
+	end
+	return n
+end
+
+local function lootNow(range)
+	return lootPromptsNow(range) + lootGuiNow(range)
+end
+
+task.spawn(function()
+	while Gui.Parent do
+		if S.AutoLoot and not S.AutoFarm then pcall(lootNow, 14) end
+		task.wait(0.8)
+	end
+end)
+
+-- ==========================================
+-- AUTO FARM: anda até o NPC, atira, mata, vai até o corpo e saqueia
+-- ==========================================
+local badTool = {"fist", "punho", "soco", "murro", "punch", "medkit", "kit", "bandag", "heal", "carro", "vehicle", "veiculo", "knife", "faca"}
+
+local function isBadTool(nm)
+	nm = string.lower(nm)
+	for _, w in ipairs(badTool) do
+		if string.find(nm, w, 1, true) then return true end
+	end
+	return false
+end
+
+local function pickGun()
+	local ch = LP.Character
+	if not ch then return end
+	local want = string.lower(S.GunName or "")
+	local held = ch:FindFirstChildOfClass("Tool")
+	local function good(t)
+		local nm = string.lower(t.Name)
+		if want ~= "" then return string.find(nm, want, 1, true) ~= nil end
+		return not isBadTool(nm)
+	end
+	if held and good(held) then return held end
+	local bp = LP:FindFirstChildOfClass("Backpack")
+	if bp then
+		for _, t in ipairs(bp:GetChildren()) do
+			if t:IsA("Tool") and good(t) then
+				local h = myHum()
+				if h then h:EquipTool(t) end
+				return t
+			end
+		end
+	end
+	return nil
+end
+
+local function shoot(tool)
+	pcall(function() tool:Activate() end)
+	if mouse1click then pcall(mouse1click) end
+end
+
+task.spawn(function()
+	local cur, lastPos, lootPos, lootStart
+	while Gui.Parent do
+		local wait = 0.15
+		if S.AutoFarm and not S.Flying then
+			local okk, e = pcall(function()
+				local r, h = myRoot(), myHum()
+				if not r or not h or h.Health <= 0 then wait = 0.5 return end
+
+				-- o alvo anterior morreu? então vai saquear
+				if cur then
+					local ch = npcs[cur]
+					if not cur.Parent or not ch or ch.Health <= 0 then
+						lootPos, lootStart = lastPos, os.clock()
+						cur = nil
+					end
+				end
+
+				if lootPos then
+					if (lootPos - r.Position).Magnitude > 6 then h:MoveTo(lootPos) end
+					if lootNow(14) > 0 or os.clock() - lootStart > 5 then lootPos = nil end
+					wait = 0.25
+					return
+				end
+
+				local m = pickNpc()
+				if not m then wait = 0.4 return end
+				local tr = rootOf(m)
+				if not tr then return end
+				cur, lastPos = m, tr.Position
+
+				local dist = (tr.Position - r.Position).Magnitude
+				if dist > S.FarmRange then
+					h:MoveTo(tr.Position)
+				else
+					h:MoveTo(r.Position)
+				end
+				if dist <= S.FarmRange + 10 then
+					local tool = pickGun()
+					if tool then shoot(tool) end
+				end
+			end)
+			if not okk then fail("autofarm", e) end
+		end
+		task.wait(wait)
+	end
+end)
 
 -- ==========================================
 -- PAINEL (tema vermelho)
@@ -1170,101 +1438,6 @@ local function buildPanel()
 			Text = "", AutoButtonColor = false}, r)
 		hov(hit, s)
 		local track = Corner(New("Frame", {AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 12, 0.5, 0), Size = UDim2.new(1, -24, 0, 5),
-		BackgroundColor3 = S[key] and K.Red or K.Off, BorderSizePixel = 0}, r), 10)
-		local knob = Corner(New("Frame", {AnchorPoint = Vector2.new(0, 0.5), Size = UDim2.new(0, 14, 0, 14), BackgroundColor3 = K.White,
-			Position = S[key] and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0), BorderSizePixel = 0}, track), 7)
-		local hit = New("TextButton", {Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = "", AutoButtonColor = false, ZIndex = 5}, r)
-		hov(hit, s)
-		hit.MouseButton1Click:Connect(function()
-			S[key] = not S[key]
-			tween(track, {BackgroundColor3 = S[key] and K.Red or K.Off})
-			tween(knob, {Position = S[key] and UDim2.new(1, -17, 0.5, 0) or UDim2.new(0, 3, 0.5, 0)})
-		end)
-	end
-
-	local function Dropdown(pg, title, opts, key)
-		local r, s = Card(pg, 46)
-		r.ClipsDescendants = true
-		Lbl(r, title, UDim2.new(0, 12, 0, 0), UDim2.new(1, -140, 0, 46), FB, 12, K.Txt)
-
-		local head = Corner(New("TextButton", {AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 9), Size = UDim2.new(0, 112, 0, 28),
-			BackgroundColor3 = K.Bg2, Text = "", AutoButtonColor = false, BorderSizePixel = 0, ZIndex = 5}, r), 8)
-		Stroke(head, K.Red, 1, 0.5)
-		local cur = Lbl(head, "", UDim2.new(0, 10, 0, 0), UDim2.new(1, -30, 1, 0), FB, 11, K.Txt)
-		cur.ZIndex = 6
-
-		-- setinha (dois tracos em V) que gira ao abrir
-		local arrow = New("Frame", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -9, 0.5, 0), Size = UDim2.new(0, 12, 0, 12),
-			BackgroundTransparency = 1, ZIndex = 6}, head)
-		for _, d in ipairs({{40, 3.5}, {-40, 8.5}}) do
-			Corner(New("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0, d[2], 0.5, 1), Size = UDim2.new(0, 7, 0, 2),
-				BackgroundColor3 = K.Red2, BorderSizePixel = 0, Rotation = d[1], ZIndex = 6}, arrow), 1)
-		end
-
-		local n = #opts
-		local optBtns = {}
-		local openState = false
-		local setOpen
-
-		local function refresh()
-			for i, b in ipairs(optBtns) do
-				local on = (opts[i][2] == S[key])
-				b.BackgroundColor3 = on and K.Red or K.Bg2
-				b.TextColor3 = on and K.White or K.Dim
-				if on then cur.Text = opts[i][1] end
-			end
-		end
-
-		for i, o in ipairs(opts) do
-			local b = Corner(New("TextButton", {Position = UDim2.new(0, 10, 0, 50 + (i - 1) * 30), Size = UDim2.new(1, -20, 0, 26),
-				BackgroundColor3 = K.Bg2, Text = o[1], Font = FB, TextSize = 11, TextColor3 = K.Dim, AutoButtonColor = false,
-				BorderSizePixel = 0}, r), 7)
-			b.MouseButton1Click:Connect(function()
-				S[key] = o[2]
-				refresh()
-				setOpen(false)
-			end)
-			optBtns[i] = b
-		end
-
-		setOpen = function(v)
-			openState = v
-			tween(r, {Size = UDim2.new(1, 0, 0, v and (50 + n * 30 + 2) or 46)})
-			tween(arrow, {Rotation = v and 180 or 0})
-		end
-
-		head.MouseButton1Click:Connect(function() setOpen(not openState) end)
-		refresh()
-	end
-
-	local function Action(pg, title, desc, label, cb)
-		local r, s = Card(pg, 46)
-		titles(r, title, desc, 118)
-		local b = Corner(New("TextButton", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), Size = UDim2.new(0, 100, 0, 28),
-			BackgroundColor3 = K.Red, Text = label, Font = FH, TextSize = 10, TextColor3 = K.White, AutoButtonColor = false,
-			BorderSizePixel = 0, ZIndex = 5}, r), 8)
-		hov(b, s)
-		b.MouseButton1Click:Connect(function() cb(b) end)
-	end
-
-	local function Input(pg, title, ph, key)
-		local r = Card(pg, 46)
-		Lbl(r, title, UDim2.new(0, 12, 0, 0), UDim2.new(1, -150, 0, 46), FB, 12, K.Txt)
-		local box = Corner(New("TextBox", {AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 9), Size = UDim2.new(0, 124, 0, 28),
-			BackgroundColor3 = K.Bg2, Text = S[key], PlaceholderText = ph, PlaceholderColor3 = K.Dim, TextColor3 = K.Txt, Font = FM,
-			TextSize = 11, ClearTextOnFocus = false, BorderSizePixel = 0}, r), 8)
-		Stroke(box, K.Red, 1, 0.5)
-		box.FocusLost:Connect(function() S[key] = box.Text end)
-	end
-
-	local function Slide(pg, title, mn, mx, key)
-		local r, s = Card(pg, 56)
-		Lbl(r, title, UDim2.new(0, 12, 0, 6), UDim2.new(0.65, 0, 0, 18), FB, 12, K.Txt)
-		local val = Lbl(r, tostring(S[key]), UDim2.new(0.65, 0, 0, 6), UDim2.new(0.35, -12, 0, 18), FB, 12, K.Red2, Enum.TextXAlignment.Right)
-		local hit = New("TextButton", {Position = UDim2.new(0, 0, 0, 24), Size = UDim2.new(1, 0, 0, 32), BackgroundTransparency = 1,
-			Text = "", AutoButtonColor = false}, r)
-		hov(hit, s)
-		local track = Corner(New("Frame", {AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 12, 0.5, 0), Size = UDim2.new(1, -24, 0, 5),
 			BackgroundColor3 = K.Off, BorderSizePixel = 0}, hit), 3)
 		local fill = Corner(New("Frame", {Size = UDim2.new(0, 0, 1, 0), BackgroundColor3 = K.Red, BorderSizePixel = 0}, track), 3)
 		New("UIGradient", {Color = ColorSequence.new(K.DarkRed, K.Red2)}, fill)
@@ -1333,36 +1506,43 @@ local function buildPanel()
 
 	Head(pSpd, "CORRIDA")
 	Switch(pSpd, "Ativar speed", "Aumenta a velocidade mesmo se o jogo travar", "SpeedOn")
-	Slide(pSpd, "Velocidade", 16, 120, "Speed")
+	Slide(pSpd, "Velocidade (recomendado 30)", 16, 60, "Speed")
 	Head(pSpd, "STAMINA")
 	Switch(pSpd, "Stamina infinita", "Corre rápido sem cansar (procura a stamina do jogo)", "InfStamina")
 
 	local pFarm = pages.FARM
-	Head(pFarm, "ZUMBIS / NPCS")
+	Head(pFarm, "AUTO FARM")
+	Switch(pFarm, "Auto farm", "Anda até o NPC, atira, mata e saqueia sozinho", "AutoFarm")
+	Switch(pFarm, "Saque automático", "Aperta \"saquear\" quando estiver perto de um corpo", "AutoLoot")
+	Action(pFarm, "Saquear agora", "Saqueia o que estiver perto de você", "SAQUEAR", function(b)
+		local n = lootNow(16)
+		note(n > 0 and "Saqueando..." or "Nada para saquear aqui perto.")
+	end)
+	Slide(pFarm, "Distância de tiro (studs)", 10, 80, "FarmRange")
+	Input(pFarm, "Nome da arma (opcional)", "ex: M4", "GunName")
+	Head(pFarm, "NPCS")
 	Switch(pFarm, "Aimbot NPC (farm)", "Gruda no NPC mais perto (pausa o aimbot de jogadores)", "NPCAim")
 	Switch(pFarm, "Mirar na cabeça", "Desligado: mira no tronco (acerta mais fácil)", "NPCHead")
 	Slide(pFarm, "Distância dos NPCs (studs)", 20, 500, "NPCDist")
 	Input(pFarm, "Filtrar por nome", "ex: Zombie", "NPCName")
 	Head(pFarm, "VOO ATÉ O DESTINO")
 	Dropdown(pFarm, "Destino", {{"Farm Zone", "farm"}, {"Gun Shop", "gun"}, {"Equipamentos", "equip"}}, "Dest")
-	Action(pFarm, "Voar até o destino", "Sobe, voa e desce no lugar", "VOAR", function(b)
+	Dropdown(pFarm, "Modo de viagem", {{"Andar (seguro)", "walk"}, {"Voar", "fly"}}, "Travel")
+	Action(pFarm, "Ir até o destino", "Anda ou voa até o lugar escolhido", "IR", function(b)
 		local key = S.Dest
 		local label = DEST[key].label
-		if marks[key] then
-			note("Voando para " .. label .. "...")
-			flyTo(marks[key], label)
-			return
+		local function go(pos)
+			if not validPos(pos) then note("Posição inválida. Vá até o lugar e use MARCAR.") return end
+			note("Indo para " .. label .. "...")
+			if S.Travel == "fly" then flyTo(pos, label) else walkTo(pos, label) end
 		end
+		if marks[key] then go(marks[key]) return end
 		b.Text = "PROCURANDO..."
 		task.spawn(function()
 			local okk, pos = pcall(findPlace, key)
-			pcall(function() b.Text = "VOAR" end)
-			if okk and pos then
-				note("Voando para " .. label .. "...")
-				flyTo(pos, label)
-			else
-				note("Não achei " .. label .. " pelo nome. Vá até lá, escolha o destino e toque em MARCAR.")
-			end
+			pcall(function() b.Text = "IR" end)
+			if okk and pos then go(pos)
+			else note("Não achei " .. label .. " pelo nome. Vá até lá, escolha o destino e toque em MARCAR.") end
 		end)
 	end)
 	Action(pFarm, "Marcar este lugar", "Salva sua posição no destino escolhido", "MARCAR", function(b)
@@ -1378,7 +1558,7 @@ local function buildPanel()
 		stopFly()
 		note("Voo cancelado.")
 	end)
-	Slide(pFarm, "Velocidade do voo", 30, 150, "FlySpeed")
+	Slide(pFarm, "Velocidade do voo", 15, 80, "FlySpeed")
 
 	local pDc = pages.DISCORD
 	Head(pDc, "COMUNIDADE")
@@ -1529,4 +1709,4 @@ end)
 if not okAll then
 	warn("[Netrix] erro: " .. tostring(errAll))
 	note("ERRO: " .. string.sub(tostring(errAll), 1, 150))
-end	
+end
