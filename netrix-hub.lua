@@ -40,6 +40,7 @@ local S = {
 	Aim = false, HS = 100, FOV = 140, MaxDist = 120, ShowFOV = false, IgnoreTeam = false,
 	Line = false, Box = false, Skel = false, Health = false, ESPOffset = 0,
 	SpeedOn = false, Speed = 32,
+	NoSpread = false, BigHead = false, HeadSize = 4,
 }
 
 local draw = false
@@ -278,6 +279,150 @@ local function aim(dt)
 end
 
 -- ==========================================
+-- CABEÇA GRANDE (só no seu jogo: muda o tamanho da cabeça dos outros na sua tela)
+-- ==========================================
+local headOrig = {}
+
+local function restoreHead(part)
+	local o = headOrig[part]
+	if o then
+		if part.Parent then
+			part.Size, part.Transparency, part.CanCollide = o.Size, o.Transparency, o.CanCollide
+		end
+		headOrig[part] = nil
+	end
+end
+
+local function headsStep()
+	for part in pairs(headOrig) do
+		if not part.Parent then headOrig[part] = nil end
+	end
+
+	if not S.BigHead then
+		for part in pairs(headOrig) do restoreHead(part) end
+		return
+	end
+
+	local sz = S.HeadSize
+	for _, p in ipairs(Players:GetPlayers()) do
+		if p ~= LP then
+			local ch = charOf(p)
+			local head = ch and ch:FindFirstChild("Head")
+			if head and head:IsA("BasePart") then
+				if valid(p) then
+					if not headOrig[head] then
+						headOrig[head] = {Size = head.Size, Transparency = head.Transparency, CanCollide = head.CanCollide}
+					end
+					head.Size = Vector3.new(sz, sz, sz)
+					head.Transparency = 0.6
+					head.CanCollide = false
+				else
+					restoreHead(head)
+				end
+			end
+		end
+	end
+end
+
+-- ==========================================
+-- SEM ESPALHAMENTO (tentativa genérica)
+-- Procura valores/atributos chamados spread, bloom, inaccuracy, deviation ou scatter
+-- nas armas e na memória do jogo, e zera. Depende de como o jogo guarda isso.
+-- ==========================================
+local spreadKeys = {"spread", "bloom", "inaccuracy", "deviation", "scatter"}
+local function isSpreadName(n)
+	if type(n) ~= "string" then return false end
+	n = string.lower(n)
+	for _, k in ipairs(spreadKeys) do
+		if string.find(n, k, 1, true) then return true end
+	end
+	return false
+end
+
+local function zeroOf(v)
+	local t = typeof(v)
+	if t == "number" then return 0 end
+	if t == "Vector3" then return Vector3.zero end
+	if t == "Vector2" then return Vector2.zero end
+	return nil
+end
+
+local spreadInst, spreadTabs = {}, {}
+local spreadWasOn, needScan, scanning = false, true, false
+
+local function zeroInst(inst)
+	if (inst:IsA("NumberValue") or inst:IsA("IntValue")) and isSpreadName(inst.Name) and inst.Value ~= 0 then
+		spreadInst[#spreadInst + 1] = {kind = "val", inst = inst, orig = inst.Value}
+		inst.Value = 0
+	end
+	for name, v in pairs(inst:GetAttributes()) do
+		local z = zeroOf(v)
+		if isSpreadName(name) and z ~= nil and v ~= z then
+			spreadInst[#spreadInst + 1] = {kind = "attr", inst = inst, name = name, orig = v}
+			inst:SetAttribute(name, z)
+		end
+	end
+end
+
+local function scanTools()
+	local boxes = {LP.Character, LP:FindFirstChildOfClass("Backpack")}
+	for _, box in ipairs(boxes) do
+		if box then
+			for _, tool in ipairs(box:GetChildren()) do
+				if tool:IsA("Tool") then
+					zeroInst(tool)
+					for _, d in ipairs(tool:GetDescendants()) do zeroInst(d) end
+				end
+			end
+		end
+	end
+end
+
+local function scanGC()
+	if not getgc then return end
+	local okk, list = pcall(getgc, true)
+	if not okk or type(list) ~= "table" then return end
+	local n = 0
+	for _, t in ipairs(list) do
+		if type(t) == "table" then
+			pcall(function()
+				for k, v in pairs(t) do
+					if isSpreadName(k) then
+						local z = zeroOf(v)
+						if z ~= nil and v ~= z then
+							spreadTabs[#spreadTabs + 1] = {t, k, v}
+							t[k] = z
+						end
+					end
+				end
+			end)
+		end
+		n = n + 1
+		if n % 1500 == 0 then task.wait() end -- nao trava o jogo
+	end
+end
+
+local function restoreSpread()
+	for _, e in ipairs(spreadInst) do
+		pcall(function()
+			if e.kind == "val" then e.inst.Value = e.orig else e.inst:SetAttribute(e.name, e.orig) end
+		end)
+	end
+	for _, e in ipairs(spreadTabs) do pcall(function() e[1][e[2]] = e[3] end) end
+	spreadInst, spreadTabs = {}, {}
+end
+
+-- quando pega uma arma nova (ou renasce), faz nova busca
+local function hookChar(ch)
+	keep(ch.ChildAdded:Connect(function(c)
+		if c:IsA("Tool") then needScan = true end
+	end))
+	needScan = true
+end
+if LP.Character then hookChar(LP.Character) end
+keep(LP.CharacterAdded:Connect(hookChar))
+
+-- ==========================================
 -- ESP: line, caixa, esqueleto e vida
 -- ==========================================
 local BonesR15 = {
@@ -395,7 +540,8 @@ local function espStep()
 					local head = ch:FindFirstChild("Head")
 					local rp = Cam:WorldToViewportPoint(root.Position)
 					if rp.Z > 0 then
-						local topW = head and (head.Position + Vector3.new(0, head.Size.Y / 2 + 0.15, 0)) or (root.Position + Vector3.new(0, 2.5, 0))
+						local hy = head and ((headOrig[head] and headOrig[head].Size.Y) or head.Size.Y)
+						local topW = head and (head.Position + Vector3.new(0, hy / 2 + 0.15, 0)) or (root.Position + Vector3.new(0, 2.5, 0))
 						local feet = math.max(3, (hum and hum.HipHeight or 2) + root.Size.Y / 2)
 						local tp = Cam:WorldToViewportPoint(topW)
 						local bp = Cam:WorldToViewportPoint(root.Position - Vector3.new(0, feet, 0))
@@ -730,6 +876,11 @@ local function buildPanel()
 	Slide(pMira, "Tamanho do FOV", 40, 400, "FOV")
 	Head(pMira, "DISTÂNCIA")
 	Slide(pMira, "Distância máxima (studs)", 20, 500, "MaxDist")
+	Head(pMira, "ARMA")
+	Switch(pMira, "Sem espalhamento", "Tenta zerar o espalhamento das balas", "NoSpread")
+	Head(pMira, "HITBOX")
+	Switch(pMira, "Aumentar cabeça", "Cabeça dos inimigos maior (só no seu jogo)", "BigHead")
+	Slide(pMira, "Tamanho da cabeça", 2, 12, "HeadSize")
 
 	Head(pEsp, "DESENHOS")
 	Switch(pEsp, "ESP Line", "Linha do topo da tela até o jogador", "Line")
@@ -845,9 +996,34 @@ task.spawn(function()
 	end
 end)
 
+-- laço leve (a cada 0.3 s): cabeça grande e sem espalhamento
+task.spawn(function()
+	while Gui.Parent do
+		local okk, e = pcall(headsStep)
+		if not okk then fail("cabeça", e) end
+
+		if S.NoSpread then
+			if (not spreadWasOn or needScan) and not scanning then
+				spreadWasOn, needScan, scanning = true, false, true
+				task.spawn(function()
+					local ok2, e2 = pcall(function() scanTools() scanGC() end)
+					if not ok2 then fail("spread", e2) end
+					scanning = false
+				end)
+			end
+		elseif spreadWasOn then
+			spreadWasOn = false
+			pcall(restoreSpread)
+		end
+		task.wait(0.3)
+	end
+end)
+
 Gui.Destroying:Connect(function()
 	if bound then pcall(function() RS:UnbindFromRenderStep(NAME) end) end
 	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+	for part in pairs(headOrig) do restoreHead(part) end
+	pcall(restoreSpread)
 	for _, o in pairs(ESP) do killObj(o) end
 	if fov then pcall(function() fov:Remove() end) end
 	local h = myHum()
