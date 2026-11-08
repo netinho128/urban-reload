@@ -41,6 +41,7 @@ local S = {
 	Line = false, Box = false, Skel = false, Health = false, ESPOffset = 0,
 	SpeedOn = false, Speed = 32,
 	NoSpread = false, BigHead = false, HeadSize = 4,
+	NPCAim = false, NPCHead = false, NPCDist = 120, NPCName = "",
 }
 
 local draw = false
@@ -240,15 +241,7 @@ end
 -- ser forte (quase 100% por frame) para realmente grudar. Mesma forca do v11.
 local AIM_SMOOTH = 14
 
-local function aim(dt)
-	local p = pickTarget(Cam.ViewportSize / 2)
-	if not p then return end
-	if os.clock() - lockT > 1.5 then lockHead, lockT = roll(), os.clock() end
-
-	local part = bodyPart(charOf(p), lockHead)
-	if not part then return end
-	local point = part.Position
-
+local function aimAtPoint(point, dt)
 	local a = math.clamp(1 - math.exp(-0.8 * AIM_SMOOTH * AIM_SMOOTH * dt), 0, 1)
 	local camPos = Cam.CFrame.Position
 	local cur = Cam.CFrame.LookVector
@@ -276,6 +269,89 @@ local function aim(dt)
 	end
 	local pos = third and (focus - newLook * zd) or camPos
 	Cam.CFrame = CFrame.lookAt(pos, pos + newLook)
+end
+
+local function aim(dt)
+	local p = pickTarget(Cam.ViewportSize / 2)
+	if not p then return end
+	if os.clock() - lockT > 1.5 then lockHead, lockT = roll(), os.clock() end
+
+	local part = bodyPart(charOf(p), lockHead)
+	if not part then return end
+	local point = part.Position
+
+	aimAtPoint(point, dt)
+end
+
+-- ==========================================
+-- AIMBOT NPC (farm de zumbis)
+-- Guarda todos os "Humanoid" que NÃO são jogadores e gruda no mais perto.
+-- ==========================================
+local npcs = {}
+
+local function regNpc(h)
+	local m = h.Parent
+	if m and m:IsA("Model") and m ~= LP.Character and not Players:GetPlayerFromCharacter(m) then
+		npcs[m] = h
+	end
+end
+
+task.spawn(function()
+	local n = 0
+	for _, d in ipairs(WS:GetDescendants()) do
+		if d:IsA("Humanoid") then regNpc(d) end
+		n = n + 1
+		if n % 3000 == 0 then task.wait() end
+	end
+end)
+keep(WS.DescendantAdded:Connect(function(d)
+	if d:IsA("Humanoid") then task.defer(regNpc, d) end
+end))
+keep(WS.DescendantRemoving:Connect(function(d)
+	if d:IsA("Humanoid") and d.Parent then npcs[d.Parent] = nil end
+end))
+
+-- filtro opcional por nome (ex.: "Zombie"); vazio = todos
+local function nameOk(m)
+	local f = S.NPCName
+	if f == nil or f == "" then return true end
+	return string.find(string.lower(m.Name), string.lower(f), 1, true) ~= nil
+end
+
+local npcLock
+local function pickNpc()
+	local me = myPos()
+	local best, bd = nil, math.huge
+	for m, h in pairs(npcs) do
+		if m.Parent and h.Parent then
+			if h.Health > 0 and nameOk(m) then
+				local r = rootOf(m)
+				if r then
+					local d = (r.Position - me).Magnitude
+					if d <= S.NPCDist and d < bd then best, bd = m, d end
+				end
+			end
+		else
+			npcs[m] = nil
+		end
+	end
+
+	-- mantém o alvo atual enquanto ele ainda estiver quase tão perto quanto o melhor
+	if npcLock and npcs[npcLock] and npcLock.Parent and npcs[npcLock].Health > 0 and nameOk(npcLock) then
+		local r = rootOf(npcLock)
+		if r and (r.Position - me).Magnitude <= bd + 6 then return npcLock end
+	end
+	npcLock = best
+	return best
+end
+
+local function aimNpc(dt)
+	local m = pickNpc()
+	if not m then return end
+	local part = S.NPCHead and m:FindFirstChild("Head") or nil
+	part = part or m:FindFirstChild("UpperTorso") or m:FindFirstChild("Torso") or rootOf(m)
+	if not part then return end
+	aimAtPoint(part.Position, dt)
 end
 
 -- ==========================================
@@ -623,7 +699,10 @@ local function step(dt)
 		if not okk then fail("fov", e) end
 	end
 
-	if S.Aim then
+	if S.NPCAim then
+		local okk, e = pcall(aimNpc, dt)
+		if not okk then fail("npc", e) end
+	elseif S.Aim then
 		local okk, e = pcall(aim, dt)
 		if not okk then fail("aim", e) end
 	else
@@ -638,6 +717,52 @@ local function onFrame(dt) step(dt or 1 / 60) end
 
 local bound = pcall(function() RS:BindToRenderStep(NAME, Enum.RenderPriority.Last.Value, onFrame) end)
 if not bound then keep(RS.RenderStepped:Connect(onFrame)) end
+
+-- ==========================================
+-- TELEPORTE
+-- ==========================================
+local savedPos
+
+local function myRoot()
+	local ch = LP.Character
+	return ch and ch:FindFirstChild("HumanoidRootPart")
+end
+
+local function tpTo(pos)
+	local r = myRoot()
+	if not r then return false end
+	r.AssemblyLinearVelocity = Vector3.zero
+	r.CFrame = CFrame.new(pos + Vector3.new(0, 4, 0))
+	return true
+end
+
+local function norm(n) return (string.gsub(string.lower(n), "[%s_%-]", "")) end
+
+-- procura no mapa algo chamado "Farm Zone" / "FarmZone" / "Farm_Zone" / "FarmArea"
+local farmNames = {"farmzone", "farmarea", "zonafarm", "areafarm"}
+local function findFarmZone()
+	local n = 0
+	for _, d in ipairs(WS:GetDescendants()) do
+		n = n + 1
+		if n % 3000 == 0 then task.wait() end
+		if d:IsA("BasePart") or d:IsA("Model") or d:IsA("Folder") then
+			local nm = norm(d.Name)
+			for _, f in ipairs(farmNames) do
+				if string.find(nm, f, 1, true) then
+					if d:IsA("BasePart") then return d.Position end
+					if d:IsA("Model") then
+						local okk, cf = pcall(function() return d:GetPivot() end)
+						if okk then return cf.Position end
+					end
+					for _, c in ipairs(d:GetDescendants()) do
+						if c:IsA("BasePart") then return c.Position end
+					end
+				end
+			end
+		end
+	end
+	return nil
+end
 
 -- ==========================================
 -- PAINEL (tema vermelho)
@@ -696,7 +821,7 @@ local function buildPanel()
 	New("UIGradient", {Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1)})}, hl)
 
 	-- abas em formato de pilula
-	local names = {"MIRA", "ESP", "SPEED", "DISCORD"}
+	local names = {"MIRA", "ESP", "SPEED", "FARM", "DISCORD"}
 	local gap = 6
 	local chipW = (MW - 24 - gap * (#names - 1)) / #names
 	for i, n in ipairs(names) do
@@ -816,6 +941,26 @@ local function buildPanel()
 		refresh()
 	end
 
+	local function Action(pg, title, desc, label, cb)
+		local r, s = Card(pg, 46)
+		titles(r, title, desc, 118)
+		local b = Corner(New("TextButton", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), Size = UDim2.new(0, 100, 0, 28),
+			BackgroundColor3 = K.Red, Text = label, Font = FH, TextSize = 10, TextColor3 = K.White, AutoButtonColor = false,
+			BorderSizePixel = 0, ZIndex = 5}, r), 8)
+		hov(b, s)
+		b.MouseButton1Click:Connect(function() cb(b) end)
+	end
+
+	local function Input(pg, title, ph, key)
+		local r = Card(pg, 46)
+		Lbl(r, title, UDim2.new(0, 12, 0, 0), UDim2.new(1, -150, 0, 46), FB, 12, K.Txt)
+		local box = Corner(New("TextBox", {AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 9), Size = UDim2.new(0, 124, 0, 28),
+			BackgroundColor3 = K.Bg2, Text = S[key], PlaceholderText = ph, PlaceholderColor3 = K.Dim, TextColor3 = K.Txt, Font = FM,
+			TextSize = 11, ClearTextOnFocus = false, BorderSizePixel = 0}, r), 8)
+		Stroke(box, K.Red, 1, 0.5)
+		box.FocusLost:Connect(function() S[key] = box.Text end)
+	end
+
 	local function Slide(pg, title, mn, mx, key)
 		local r, s = Card(pg, 56)
 		Lbl(r, title, UDim2.new(0, 12, 0, 6), UDim2.new(0.65, 0, 0, 18), FB, 12, K.Txt)
@@ -894,6 +1039,42 @@ local function buildPanel()
 	Switch(pSpd, "Ativar speed", "Velocidade personalizada", "SpeedOn")
 	Slide(pSpd, "Velocidade", 16, 120, "Speed")
 
+	local pFarm = pages.FARM
+	Head(pFarm, "ZUMBIS / NPCS")
+	Switch(pFarm, "Aimbot NPC (farm)", "Gruda no NPC mais perto (pausa o aimbot de jogadores)", "NPCAim")
+	Switch(pFarm, "Mirar na cabeça", "Desligado: mira no tronco (acerta mais fácil)", "NPCHead")
+	Slide(pFarm, "Distância dos NPCs (studs)", 20, 500, "NPCDist")
+	Input(pFarm, "Filtrar por nome", "ex: Zombie", "NPCName")
+	Head(pFarm, "TELEPORTE")
+	Action(pFarm, "Ir para a Farm Zone", "Procura a área pelo nome no mapa", "IR", function(b)
+		b.Text = "PROCURANDO..."
+		task.spawn(function()
+			local okk, pos = pcall(findFarmZone)
+			if okk and pos and tpTo(pos) then
+				note("Teleportado para a Farm Zone!")
+			else
+				note("Não achei a Farm Zone pelo nome. Vá até lá, toque em MARCAR e depois em TELEPORTAR.")
+			end
+			pcall(function() b.Text = "IR" end)
+		end)
+	end)
+	Action(pFarm, "Marcar local atual", "Fique na Farm Zone e toque aqui", "MARCAR", function(b)
+		local r = myRoot()
+		if r then
+			savedPos = r.Position
+			b.Text = "MARCADO!"
+			note("Local marcado!")
+			task.delay(1.5, function() pcall(function() b.Text = "MARCAR" end) end)
+		end
+	end)
+	Action(pFarm, "Teleportar para o local", "Vai até o local que você marcou", "TELEPORTAR", function(b)
+		if savedPos and tpTo(savedPos) then
+			note("Teleportado!")
+		else
+			note("Nenhum local marcado ainda.")
+		end
+	end)
+
 	local pDc = pages.DISCORD
 	Head(pDc, "COMUNIDADE")
 
@@ -910,10 +1091,9 @@ local function buildPanel()
 	dsub.TextWrapped = true
 	dsub.TextYAlignment = Enum.TextYAlignment.Top
 
-	local copyBtn = Corner(New("TextButton", {Position = UDim2.new(0, 14, 1, -38), Size = UDim2.new(1, -28, 0, 28), BackgroundColor3 = K.White,
+	local copyBtn = Corner(New("TextButton", {Position = UDim2.new(0, 14, 1, -38), Size = UDim2.new(1, -28, 0, 28), BackgroundColor3 = K.Red,
 		Text = "COPIAR LINK DO DISCORD", Font = FH, TextSize = 12, TextColor3 = K.White, AutoButtonColor = false, BorderSizePixel = 0,
 		ZIndex = 5}, banner), 9)
-	New("UIGradient", {Rotation = 0, Color = ColorSequence.new(K.DarkRed, K.Red2)}, copyBtn)
 	copyBtn.MouseButton1Click:Connect(function()
 		local copied = false
 		local copy = setclipboard or toclipboard
@@ -987,7 +1167,11 @@ task.spawn(function()
 					for _, p in ipairs(Players:GetPlayers()) do
 						if valid(p) then n = n + 1 end
 					end
-					status.Text = string.format("Alvos: %d   •   Drawing: %s", n, draw and "ok" or "indisponível")
+					local c = 0
+					for m, h in pairs(npcs) do
+						if m.Parent and h.Health > 0 and nameOk(m) then c = c + 1 end
+					end
+					status.Text = string.format("Alvos: %d  •  NPCs: %d  •  Drawing: %s", n, c, draw and "ok" or "indisponível")
 					status.TextColor3 = K.Dim
 				end
 			end)
