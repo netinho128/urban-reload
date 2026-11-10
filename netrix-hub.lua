@@ -38,18 +38,17 @@ local FH, FB, FM = Enum.Font.GothamBlack, Enum.Font.GothamBold, Enum.Font.Gotham
 -- ==========================================
 local S = {
 	Aim = false, HS = 100, FOV = 140, MaxDist = 120, ShowFOV = false, IgnoreTeam = false,
-	Line = false, Box = false, Skel = false, Health = false, ESPOffset = 0,
+	Line = false, Box = false, Skel = false, Health = false,
 	SpeedOn = false, Speed = 30,
 	NoSpread = false, BigHead = false, HeadSize = 4,
-	NPCAim = false, NPCHead = false, NPCDist = 120, NPCName = "",
-	Dest = "farm", FlySpeed = 40, Flying = false, InfStamina = false,
-	Travel = "walk", AutoFarm = false, AutoLoot = false, LootRange = 30, GunName = "",
+	NPCAim = false, NPCHead = false, NPCDist = 120, NPCName = "", IgnoreDead = true,
+	NPCShowFOV = false, NPCFOV = 160, NPCBox = false, NPCSkel = false,
+	InfStamina = false,
 	FlyFree = false, FlyFreeSpeed = 40, Noclip = false,
 	ESPName = false, ESPDist = false, ColESP = K.Red, ColFOV = K.Red,
 }
 
-local draw = false
-pcall(function() draw = Drawing ~= nil and Drawing.new ~= nil end)
+local draw = true -- desenho próprio (não depende do Drawing do executor)
 
 local lastErr = nil
 local function fail(where, e)
@@ -91,7 +90,7 @@ pcall(function() roots[#roots + 1] = game:GetService("CoreGui") end)
 pcall(function() roots[#roots + 1] = LP:FindFirstChild("PlayerGui") end)
 for _, root in ipairs(roots) do
 	pcall(function()
-		for _, n in ipairs({NAME, "NetrixUrbanReload"}) do
+		for _, n in ipairs({NAME, NAME .. "ESP", "NetrixUrbanReload"}) do
 			local old = root:FindFirstChild(n)
 			if old then old:Destroy() end
 		end
@@ -104,6 +103,96 @@ pcall(function() if syn and syn.protect_gui then syn.protect_gui(Gui) end end)
 pcall(function() if gethui then Gui.Parent = gethui() parented = Gui.Parent ~= nil end end)
 if not parented then pcall(function() Gui.Parent = game:GetService("CoreGui") parented = Gui.Parent ~= nil end) end
 if not parented then Gui.Parent = LP:WaitForChild("PlayerGui") end
+
+-- ==========================================
+-- DESENHO (ESP/FOV) com interface própria: as posições batem exatamente com a tela
+-- ==========================================
+local EG = New("ScreenGui", {Name = NAME .. "ESP", ResetOnSpawn = false, IgnoreGuiInset = true, DisplayOrder = 50,
+	ZIndexBehavior = Enum.ZIndexBehavior.Sibling})
+pcall(function() if syn and syn.protect_gui then syn.protect_gui(EG) end end)
+pcall(function() EG.Parent = Gui.Parent end)
+if not EG.Parent then pcall(function() EG.Parent = LP:WaitForChild("PlayerGui") end) end
+
+local Draw = {}
+function Draw.new(kind)
+	local v = {Visible = false, Color = Color3.new(1, 1, 1), Thickness = 1}
+	local inst, render
+
+	if kind == "Line" then
+		v.From, v.To = Vector2.new(0, 0), Vector2.new(0, 0)
+		inst = New("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0, Visible = false}, EG)
+		render = function()
+			if not v.Visible then inst.Visible = false return end
+			local d = v.To - v.From
+			inst.Size = UDim2.fromOffset(d.Magnitude, math.max(v.Thickness, 1))
+			inst.Position = UDim2.fromOffset((v.From.X + v.To.X) / 2, (v.From.Y + v.To.Y) / 2)
+			inst.Rotation = math.deg(math.atan2(d.Y, d.X))
+			inst.BackgroundColor3 = v.Color
+			inst.Visible = true
+		end
+	elseif kind == "Square" then
+		v.Position, v.Size, v.Filled = Vector2.new(0, 0), Vector2.new(0, 0), false
+		inst = New("Frame", {BorderSizePixel = 0, Visible = false}, EG)
+		local st = New("UIStroke", {ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, inst)
+		render = function()
+			if not v.Visible then inst.Visible = false return end
+			inst.Position = UDim2.fromOffset(v.Position.X, v.Position.Y)
+			inst.Size = UDim2.fromOffset(v.Size.X, v.Size.Y)
+			inst.BackgroundColor3 = v.Color
+			inst.BackgroundTransparency = v.Filled and 0 or 1
+			st.Color = v.Color
+			st.Thickness = v.Thickness
+			st.Enabled = not v.Filled
+			inst.Visible = true
+		end
+	elseif kind == "Circle" then
+		v.Position, v.Radius, v.NumSides, v.Filled = Vector2.new(0, 0), 50, 32, false
+		inst = New("Frame", {AnchorPoint = Vector2.new(0.5, 0.5), BorderSizePixel = 0, Visible = false}, EG)
+		New("UICorner", {CornerRadius = UDim.new(1, 0)}, inst)
+		local st = New("UIStroke", {ApplyStrokeMode = Enum.ApplyStrokeMode.Border}, inst)
+		render = function()
+			if not v.Visible then inst.Visible = false return end
+			inst.Position = UDim2.fromOffset(v.Position.X, v.Position.Y)
+			inst.Size = UDim2.fromOffset(v.Radius * 2, v.Radius * 2)
+			inst.BackgroundColor3 = v.Color
+			inst.BackgroundTransparency = v.Filled and 0.6 or 1
+			st.Color = v.Color
+			st.Thickness = v.Thickness
+			inst.Visible = true
+		end
+	else -- "Text"
+		v.Text, v.Position, v.Size, v.Center, v.Outline = "", Vector2.new(0, 0), 13, false, false
+		inst = New("TextLabel", {BackgroundTransparency = 1, BorderSizePixel = 0, Font = Enum.Font.GothamMedium,
+			TextWrapped = false, Visible = false}, EG)
+		render = function()
+			if not v.Visible then inst.Visible = false return end
+			inst.Text = v.Text
+			inst.TextSize = v.Size
+			inst.TextColor3 = v.Color
+			inst.TextStrokeTransparency = v.Outline and 0 or 1
+			inst.TextXAlignment = v.Center and Enum.TextXAlignment.Center or Enum.TextXAlignment.Left
+			inst.AnchorPoint = Vector2.new(v.Center and 0.5 or 0, 0)
+			inst.Size = UDim2.fromOffset(240, v.Size + 4)
+			inst.Position = UDim2.fromOffset(v.Position.X, v.Position.Y)
+			inst.Visible = true
+		end
+	end
+
+	return setmetatable({}, {
+		__index = function(_, k)
+			if k == "Remove" or k == "Destroy" then
+				return function() pcall(function() inst:Destroy() end) end
+			end
+			return v[k]
+		end,
+		__newindex = function(_, k, val)
+			if v[k] ~= val then
+				v[k] = val
+				render()
+			end
+		end,
+	})
+end
 
 local function draggable(handle, target, onClick)
 	local dragging, moved, start, startPos, cur = false, false, nil, nil, nil
@@ -175,12 +264,23 @@ end
 local fov
 if draw then
 	pcall(function()
-		fov = Drawing.new("Circle")
+		fov = Draw.new("Circle")
 		fov.Thickness = 1.5
 		fov.NumSides = 48
 		fov.Filled = false
 		fov.Color = K.Red
 		fov.Visible = false
+	end)
+end
+local npcFov
+if draw then
+	pcall(function()
+		npcFov = Draw.new("Circle")
+		npcFov.Thickness = 1.5
+		npcFov.NumSides = 48
+		npcFov.Filled = false
+		npcFov.Color = K.Red
+		npcFov.Visible = false
 	end)
 end
 
@@ -324,6 +424,22 @@ end
 
 -- NPC morto (vida zero, estado Dead, marcado como morto ou deitado no chão) nunca vira alvo
 local deadNpc = setmetatable({}, {__mode = "k"})
+
+-- corpo saqueável (tem o botão "saquear") = morto
+local corpseCache = setmetatable({}, {__mode = "k"})
+local function hasLootPrompt(m)
+	local c = corpseCache[m]
+	if c and os.clock() < c.t then return c.v end
+	local v = false
+	for _, d in ipairs(m:GetDescendants()) do
+		if d:IsA("ProximityPrompt") then
+			local t = string.lower((d.ActionText or "") .. " " .. (d.ObjectText or "") .. " " .. d.Name)
+			if string.find(t, "saque", 1, true) or string.find(t, "loot", 1, true) then v = true break end
+		end
+	end
+	corpseCache[m] = {t = os.clock() + 1, v = v}
+	return v
+end
 local function alive(m, h)
 	if deadNpc[m] then return false end
 	local dead = h.Health <= 0.5
@@ -335,9 +451,21 @@ local function alive(m, h)
 		dead = m:GetAttribute("Dead") == true or m:GetAttribute("IsDead") == true or m:GetAttribute("Died") == true
 	end
 	if dead then deadNpc[m] = true return false end
+	if hasLootPrompt(m) then deadNpc[m] = true return false end
 	local r = rootOf(m)
 	if r and r.CFrame.UpVector.Y < 0.3 then return false end -- deitado/ragdoll
 	return true
+end
+
+local function usable(m, h)
+	if S.IgnoreDead then return alive(m, h) end
+	return h.Health > 0
+end
+
+local function inNpcFov(r)
+	if not S.NPCShowFOV then return true end
+	local v = Cam:WorldToViewportPoint(r.Position)
+	return v.Z > 0 and (Vector2.new(v.X, v.Y) - Cam.ViewportSize / 2).Magnitude <= S.NPCFOV
 end
 
 local npcLock
@@ -346,11 +474,11 @@ local function pickNpc()
 	local best, bd = nil, math.huge
 	for m, h in pairs(npcs) do
 		if m.Parent and h.Parent then
-			if alive(m, h) and nameOk(m) then
+			if usable(m, h) and nameOk(m) then
 				local r = rootOf(m)
 				if r then
 					local d = (r.Position - me).Magnitude
-					if d <= S.NPCDist and d < bd then best, bd = m, d end
+					if d <= S.NPCDist and d < bd and inNpcFov(r) then best, bd = m, d end
 				end
 			end
 		else
@@ -359,9 +487,9 @@ local function pickNpc()
 	end
 
 	-- mantém o alvo atual enquanto ele ainda estiver quase tão perto quanto o melhor
-	if npcLock and npcs[npcLock] and npcLock.Parent and alive(npcLock, npcs[npcLock]) and nameOk(npcLock) then
+	if npcLock and npcs[npcLock] and npcLock.Parent and usable(npcLock, npcs[npcLock]) and nameOk(npcLock) then
 		local r = rootOf(npcLock)
-		if r and (r.Position - me).Magnitude <= bd + 6 then return npcLock end
+		if r and (r.Position - me).Magnitude <= bd + 6 and inNpcFov(r) then return npcLock end
 	end
 	npcLock = best
 	return best
@@ -539,9 +667,9 @@ local RED, GREEN = Color3.fromRGB(255, 60, 60), Color3.fromRGB(70, 235, 120)
 
 local function newObj()
 	local o = {
-		Snap = Drawing.new("Line"), Box = Drawing.new("Square"),
-		HpBg = Drawing.new("Line"), HpFill = Drawing.new("Line"), HpTxt = Drawing.new("Text"),
-		Name = Drawing.new("Text"), Dist = Drawing.new("Text"),
+		Snap = Draw.new("Line"), Box = Draw.new("Square"),
+		HpBg = Draw.new("Line"), HpFill = Draw.new("Line"), HpTxt = Draw.new("Text"),
+		Name = Draw.new("Text"), Dist = Draw.new("Text"),
 		Bones = {},
 	}
 	o.Snap.Color = K.Red
@@ -594,7 +722,7 @@ end))
 local function drawSkeleton(o, ch, yoff)
 	local bones = ch:FindFirstChild("UpperTorso") and BonesR15 or BonesR6
 	for i = #o.Bones + 1, #bones do
-		local l = Drawing.new("Line")
+		local l = Draw.new("Line")
 		l.Color = K.White
 		l.Thickness = 1.3
 		l.Visible = false
@@ -619,7 +747,7 @@ local function drawSkeleton(o, ch, yoff)
 	hideBones(o, #bones + 1)
 end
 
-local function espStep()
+local function playersEsp()
 	if not draw then return end
 	if not (S.Line or S.Box or S.Skel or S.Health or S.ESPName or S.ESPDist) then
 		if espShown then
@@ -630,7 +758,7 @@ local function espStep()
 	end
 	espShown = true
 	local vs = Cam.ViewportSize
-	local yoff = S.ESPOffset
+	local yoff = 0
 
 	for _, p in ipairs(Players:GetPlayers()) do
 		if p ~= LP then
@@ -712,6 +840,104 @@ local function espStep()
 	end
 end
 
+-- ESP de NPC: só caixa e esqueleto (apenas NPCs vivos, dentro da distância)
+local ESPN = {}
+local function newNpcObj()
+	local o = {Box = Draw.new("Square"), Bones = {}}
+	o.Box.Thickness = 1.5
+	o.Box.Filled = false
+	o.Box.Visible = false
+	return o
+end
+local function hideNpc(o)
+	o.Box.Visible = false
+	hideBones(o)
+end
+
+local function bboxOnScreen(ch)
+	local okk, cf, size = pcall(function() return ch:GetBoundingBox() end)
+	if not okk then return end
+	local x0, y0, x1, y1 = math.huge, math.huge, -math.huge, -math.huge
+	for _, sx in ipairs({-1, 1}) do
+		for _, sy in ipairs({-1, 1}) do
+			for _, sz in ipairs({-1, 1}) do
+				local wp = cf:PointToWorldSpace(Vector3.new(sx * size.X / 2, sy * size.Y / 2, sz * size.Z / 2))
+				local v = Cam:WorldToViewportPoint(wp)
+				if v.Z <= 0 then return end
+				x0, y0 = math.min(x0, v.X), math.min(y0, v.Y)
+				x1, y1 = math.max(x1, v.X), math.max(y1, v.Y)
+			end
+		end
+	end
+	return x0, y0, x1, y1
+end
+
+local npcShown = false
+local function npcEsp()
+	if not (S.NPCBox or S.NPCSkel) then
+		if npcShown then
+			for _, o in pairs(ESPN) do hideNpc(o) end
+			npcShown = false
+		end
+		return
+	end
+	npcShown = true
+
+	local me = myPos()
+	local list = {}
+	for m, h in pairs(npcs) do
+		if m.Parent and h.Parent then
+			local r = rootOf(m)
+			if r and alive(m, h) then
+				local d = (r.Position - me).Magnitude
+				if d <= S.NPCDist then list[#list + 1] = {m, d} end
+			end
+		end
+	end
+	table.sort(list, function(a, b) return a[2] < b[2] end)
+
+	local used = {}
+	for i = 1, math.min(#list, 20) do
+		local m = list[i][1]
+		used[m] = true
+		local o = ESPN[m]
+		if not o then
+			o = newNpcObj()
+			ESPN[m] = o
+		end
+		o.Box.Color = S.ColESP
+		local x0, y0, x1, y1 = bboxOnScreen(m)
+		if x0 then
+			o.Box.Visible = S.NPCBox
+			if S.NPCBox then
+				o.Box.Position = Vector2.new(x0, y0)
+				o.Box.Size = Vector2.new(x1 - x0, y1 - y0)
+			end
+			if S.NPCSkel then drawSkeleton(o, m, 0) else hideBones(o) end
+		else
+			hideNpc(o)
+		end
+	end
+
+	for m, o in pairs(ESPN) do
+		if not used[m] then
+			if not m.Parent then
+				killObj(o)
+				ESPN[m] = nil
+			else
+				hideNpc(o)
+			end
+		end
+	end
+end
+
+local function espStep()
+	local o1, e1 = pcall(playersEsp)
+	if not o1 then fail("esp", e1) end
+	local o2, e2 = pcall(npcEsp)
+	if not o2 then fail("esp npc", e2) end
+end
+
 -- ==========================================
 -- SPEED
 -- ==========================================
@@ -733,7 +959,7 @@ keep(RS.Heartbeat:Connect(function(dt)
 		return
 	end
 	speedWas = true
-	if S.Flying or S.FlyFree then return end
+	if S.FlyFree then return end
 
 	local ch = LP.Character
 	local h = ch and ch:FindFirstChildOfClass("Humanoid")
@@ -865,7 +1091,19 @@ local function step(dt)
 		if not okk then fail("fov", e) end
 	end
 
-	if S.NPCAim or S.AutoFarm then
+	if npcFov then
+		local okk, e = pcall(function()
+			npcFov.Visible = S.NPCShowFOV
+			if S.NPCShowFOV then
+				npcFov.Position = Cam.ViewportSize / 2
+				npcFov.Radius = S.NPCFOV
+				npcFov.Color = S.ColFOV
+			end
+		end)
+		if not okk then fail("fov npc", e) end
+	end
+
+	if S.NPCAim then
 		local okk, e = pcall(aimNpc, dt)
 		if not okk then fail("npc", e) end
 	elseif S.Aim then
@@ -883,433 +1121,6 @@ local function onFrame(dt) step(dt or 1 / 60) end
 
 local bound = pcall(function() RS:BindToRenderStep(NAME, Enum.RenderPriority.Last.Value, onFrame) end)
 if not bound then keep(RS.RenderStepped:Connect(onFrame)) end
-
--- ==========================================
--- VOO ATÉ O DESTINO
--- O teleporte instantâneo era desfeito pelo jogo. Aqui o personagem sobe, voa
--- até o lugar e desce, andando de verdade em vez de "pular" de um ponto ao outro.
--- ==========================================
-local DEST = {
-	farm = {label = "Farm Zone", names = {"farmzone", "farmarea", "zonafarm", "areafarm"}},
-	gun = {label = "Gun Shop", names = {"gunshop", "gunstore", "weaponshop", "weaponstore", "armory", "armoury", "lojadearmas"}},
-	equip = {label = "Equipamentos", names = {"equipmentshop", "equipshop", "equipmentstore", "gearshop", "gearstore",
-		"supplyshop", "itemshop", "lojadeequipamentos"}},
-}
-local marks = {} -- lugares que você marcou: marks.farm = Vector3
-
-local function myRoot()
-	local ch = LP.Character
-	return ch and ch:FindFirstChild("HumanoidRootPart")
-end
-
-local function norm(n) return (string.gsub(string.lower(n), "[%s_%-]", "")) end
-
--- procura no mapa pelo nome; os nomes da lista estão em ordem de prioridade
-local function findPlace(key)
-	local names = DEST[key].names
-	local bestIdx, bestPos = math.huge, nil
-	local n = 0
-	for _, d in ipairs(WS:GetDescendants()) do
-		n = n + 1
-		if n % 3000 == 0 then task.wait() end
-		if d:IsA("BasePart") or d:IsA("Model") or d:IsA("Folder") then
-			local nm = norm(d.Name)
-			for idx, f in ipairs(names) do
-				if idx >= bestIdx then break end
-				if string.find(nm, f, 1, true) then
-					local pos
-					if d:IsA("BasePart") then
-						pos = d.Position
-					elseif d:IsA("Model") then
-						local okk, cf = pcall(function() return d:GetPivot() end)
-						if okk then pos = cf.Position end
-					else
-						for _, c in ipairs(d:GetDescendants()) do
-							if c:IsA("BasePart") then pos = c.Position break end
-						end
-					end
-					if pos then bestIdx, bestPos = idx, pos end
-					break
-				end
-			end
-		end
-	end
-	return bestPos
-end
-
-local flyToken = 0
-local flyClip = {}
-
-local function stopFly()
-	flyToken = flyToken + 1
-	S.Flying = false
-	for part in pairs(flyClip) do
-		if part.Parent then part.CanCollide = true end
-		flyClip[part] = nil
-	end
-end
-
-local function flyTo(dest, label)
-	local r = myRoot()
-	if not r then note("Personagem não encontrado.") return end
-	stopFly()
-	local token = flyToken
-	S.Flying = true
-
-	local cruise = math.max(r.Position.Y, dest.Y) + 20
-	local goal = dest + Vector3.new(0, 4, 0)
-	local phase = 1
-	local expected
-	local conn, clipConn
-
-	local function finish(msg)
-		if conn then conn:Disconnect() end
-		if clipConn then clipConn:Disconnect() end
-		if token == flyToken then stopFly() end
-		if msg then note(msg) end
-	end
-
-	-- atravessa paredes só durante o voo
-	clipConn = RS.Stepped:Connect(function()
-		if token ~= flyToken then return end
-		local ch = LP.Character
-		if not ch then return end
-		for _, d in ipairs(ch:GetChildren()) do
-			if d:IsA("BasePart") and d.CanCollide then
-				d.CanCollide = false
-				flyClip[d] = true
-			end
-		end
-	end)
-
-	conn = RS.Heartbeat:Connect(function(dt)
-		if token ~= flyToken then finish() return end
-		local root, h = myRoot(), myHum()
-		if not root or not h or h.Health <= 0 then finish("Voo cancelado.") return end
-
-		local pos = root.Position
-		if expected and (pos - expected).Magnitude > 30 then
-			finish("O jogo puxou você de volta. Use o modo ANDAR (seguro).")
-			return
-		end
-		local target
-		if phase == 1 then
-			target = Vector3.new(pos.X, cruise, pos.Z)
-		elseif phase == 2 then
-			target = Vector3.new(goal.X, cruise, goal.Z)
-		else
-			target = goal
-		end
-
-		local delta = target - pos
-		local step = S.FlySpeed * dt
-		if delta.Magnitude <= step then
-			root.CFrame = root.CFrame + delta
-			phase = phase + 1
-			if phase > 3 then finish("Chegou em " .. label .. "!") return end
-		else
-			root.CFrame = root.CFrame + delta.Unit * step
-		end
-		root.AssemblyLinearVelocity = Vector3.zero
-		root.AssemblyAngularVelocity = Vector3.zero
-		expected = root.Position
-	end)
-end
-
--- ==========================================
--- ANDAR ATÉ O DESTINO (caminho de verdade, o jogo não puxa de volta)
--- ==========================================
-local function validPos(v)
-	return v and v.X == v.X and v.Y == v.Y and v.Z == v.Z and v.Magnitude < 20000
-end
-
-local function walkTo(dest, label)
-	local r, h = myRoot(), myHum()
-	if not r or not h then note("Personagem não encontrado.") return end
-	stopFly()
-	local token = flyToken
-	S.Flying = true
-	task.spawn(function()
-		local wps
-		pcall(function()
-			local path = game:GetService("PathfindingService"):CreatePath({AgentRadius = 2, AgentHeight = 5, AgentCanJump = true})
-			path:ComputeAsync(r.Position, dest)
-			if path.Status == Enum.PathStatus.Success then wps = path:GetWaypoints() end
-		end)
-		if not wps then wps = {{Position = dest, Action = Enum.PathWaypointAction.Walk}} end
-
-		for _, wp in ipairs(wps) do
-			if token ~= flyToken then return end
-			local hh = myHum()
-			if not hh or hh.Health <= 0 then break end
-			if wp.Action == Enum.PathWaypointAction.Jump then hh.Jump = true end
-			hh:MoveTo(wp.Position)
-			local t0 = os.clock()
-			while token == flyToken and os.clock() - t0 < 6 do
-				local rr = myRoot()
-				if not rr then break end
-				local a = Vector3.new(rr.Position.X, 0, rr.Position.Z)
-				local b = Vector3.new(wp.Position.X, 0, wp.Position.Z)
-				if (a - b).Magnitude <= 4 then break end
-				task.wait(0.1)
-			end
-		end
-		if token == flyToken then
-			stopFly()
-			note("Chegou em " .. label .. "!")
-		end
-	end)
-end
-
--- ==========================================
--- SAQUEAR ("Toque aqui para saquear")
--- Aperta sozinho o prompt/botão de saquear que estiver perto de você.
--- ==========================================
-local VIM = game:GetService("VirtualInputManager")
-local GuiSvc = game:GetService("GuiService")
-local lootPrompts = {}
-local lootSeen = setmetatable({}, {__mode = "k"})
-
-local function isLootText(t)
-	t = string.lower(t or "")
-	return string.find(t, "saque", 1, true) ~= nil or string.find(t, "loot", 1, true) ~= nil
-end
-
-task.spawn(function()
-	local n = 0
-	for _, d in ipairs(WS:GetDescendants()) do
-		if d:IsA("ProximityPrompt") then lootPrompts[d] = true end
-		n = n + 1
-		if n % 3000 == 0 then task.wait() end
-	end
-end)
-keep(WS.DescendantAdded:Connect(function(d)
-	if d:IsA("ProximityPrompt") then lootPrompts[d] = true end
-end))
-keep(WS.DescendantRemoving:Connect(function(d) lootPrompts[d] = nil end))
-
-local function promptPos(pr)
-	local par = pr.Parent
-	if par and par:IsA("Attachment") then return par.WorldPosition end
-	if par and par:IsA("BasePart") then return par.Position end
-	local m = par and par:FindFirstAncestorOfClass("Model")
-	local rr = m and rootOf(m)
-	return rr and rr.Position
-end
-
-local function lootPromptsNow(range)
-	local r = myRoot()
-	if not r then return 0 end
-	local n = 0
-	for pr in pairs(lootPrompts) do
-		if pr.Parent and pr.Enabled and (lootSeen[pr] or 0) < os.clock() then
-			local txt = (pr.ActionText or "") .. " " .. (pr.ObjectText or "") .. " " .. pr.Name
-			if isLootText(txt) then
-				local pos = promptPos(pr)
-				if pos and (pos - r.Position).Magnitude <= range then
-					lootSeen[pr] = os.clock() + 1.5
-					pcall(function() pr.HoldDuration = 0 end)
-					local okk = false
-					if fireproximityprompt then okk = pcall(fireproximityprompt, pr) end
-					if not okk then
-						pcall(function() pr:InputHoldBegin() task.wait(0.05) pr:InputHoldEnd() end)
-					end
-					n = n + 1
-				end
-			end
-		end
-	end
-	return n
-end
-
-local function pressGui(btn, sx, sy)
-	local done = false
-	if firesignal then
-		pcall(function() firesignal(btn.MouseButton1Click) done = true end)
-		pcall(function() firesignal(btn.Activated) done = true end)
-	end
-	if not done and getconnections then
-		pcall(function()
-			for _, c in ipairs(getconnections(btn.MouseButton1Click)) do c:Fire() end
-			done = true
-		end)
-	end
-	if not done then
-		pcall(function()
-			local x, y = sx, sy
-			if not x then
-				local ap, asz = btn.AbsolutePosition, btn.AbsoluteSize
-				x, y = ap.X + asz.X / 2, ap.Y + asz.Y / 2
-				local sg = btn:FindFirstAncestorOfClass("ScreenGui")
-				if sg and not sg.IgnoreGuiInset then y = y + GuiSvc:GetGuiInset().Y end
-			end
-			VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
-			task.wait(0.03)
-			VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
-		end)
-	end
-end
-
-local function lootGuiNow(range)
-	local pg = LP:FindFirstChildOfClass("PlayerGui")
-	local r = myRoot()
-	if not pg or not r then return 0 end
-	local n = 0
-	for _, d in ipairs(pg:GetDescendants()) do
-		if (d:IsA("TextButton") or d:IsA("TextLabel")) and d.Visible and isLootText(d.Text)
-			and not d:IsDescendantOf(Gui) and (lootSeen[d] or 0) < os.clock() then
-			local btn = d:IsA("TextButton") and d or d:FindFirstAncestorWhichIsA("GuiButton") or d
-			local near = true
-			local sx, sy
-			local bb = d:FindFirstAncestorOfClass("BillboardGui")
-			if bb then
-				local ad = bb.Adornee
-				local pos
-				if ad and ad:IsA("BasePart") then pos = ad.Position
-				elseif ad and ad:IsA("Attachment") then pos = ad.WorldPosition
-				elseif ad and ad:IsA("Model") then local rr = rootOf(ad) pos = rr and rr.Position end
-				near = bb.Enabled and (pos == nil or (pos - r.Position).Magnitude <= range)
-				if pos then
-					local v3, on = Cam:WorldToViewportPoint(pos)
-					if on then sx, sy = v3.X, v3.Y end
-				end
-			end
-			if near and btn:IsA("GuiButton") then
-				lootSeen[d] = os.clock() + 1.5
-				pressGui(btn, sx, sy)
-				n = n + 1
-			end
-		end
-	end
-	return n
-end
-
-local function lootNow(range)
-	return lootPromptsNow(range) + lootGuiNow(range)
-end
-
-task.spawn(function()
-	while Gui.Parent do
-		if S.AutoLoot and not S.AutoFarm then pcall(lootNow, S.LootRange) end
-		task.wait(0.8)
-	end
-end)
-
--- ==========================================
--- AUTO FARM (parado): mira no NPC mais perto, aperta o botão de tiro da tela e saqueia
--- ==========================================
-local badTool = {"fist", "punho", "soco", "murro", "punch", "medkit", "kit", "bandag", "heal", "carro", "vehicle", "veiculo", "knife", "faca"}
-
-local function isBadTool(nm)
-	nm = string.lower(nm)
-	for _, w in ipairs(badTool) do
-		if string.find(nm, w, 1, true) then return true end
-	end
-	return false
-end
-
-local function pickGun()
-	local ch = LP.Character
-	if not ch then return end
-	local want = string.lower(S.GunName or "")
-	local held = ch:FindFirstChildOfClass("Tool")
-	local function good(t)
-		local nm = string.lower(t.Name)
-		if want ~= "" then return string.find(nm, want, 1, true) ~= nil end
-		return not isBadTool(nm)
-	end
-	if held and good(held) then return held end
-	local bp = LP:FindFirstChildOfClass("Backpack")
-	if bp then
-		for _, t in ipairs(bp:GetChildren()) do
-			if t:IsA("Tool") and good(t) then
-				local h = myHum()
-				if h then h:EquipTool(t) end
-				return t
-			end
-		end
-	end
-	return nil
-end
-
--- acha o botão redondo de tiro (a bala, embaixo à direita); se não achar usa a posição dele na tela
-local fireBtn, fireBtnAt = nil, 0
-local function findFireBtn()
-	if fireBtn and fireBtn.Parent and os.clock() - fireBtnAt < 5 then return fireBtn end
-	fireBtnAt, fireBtn = os.clock(), nil
-	local pg = LP:FindFirstChildOfClass("PlayerGui")
-	if not pg then return end
-	local vs = Cam.ViewportSize
-	local best, bs = nil, math.huge
-	for _, d in ipairs(pg:GetDescendants()) do
-		if d:IsA("GuiButton") and d.Visible and not d:IsDescendantOf(Gui) then
-			local sz = d.AbsoluteSize
-			if sz.X > vs.X * 0.04 and sz.X < vs.X * 0.16 then
-				local c = d.AbsolutePosition + sz / 2
-				local dx, dy = c.X / vs.X - 0.8415, c.Y / vs.Y - 0.659
-				local dd = dx * dx + dy * dy
-				if dd < bs then best, bs = d, dd end
-			end
-		end
-	end
-	if best and bs < 0.0016 then fireBtn = best end
-	return fireBtn
-end
-
-local function shoot(tool)
-	local b = findFireBtn()
-	local x, y
-	if b then
-		local ap, sz = b.AbsolutePosition, b.AbsoluteSize
-		x, y = ap.X + sz.X / 2, ap.Y + sz.Y / 2
-		local sg = b:FindFirstAncestorOfClass("ScreenGui")
-		if sg and not sg.IgnoreGuiInset then y = y + GuiSvc:GetGuiInset().Y end
-		if firesignal then
-			pcall(function() firesignal(b.MouseButton1Down) end)
-			pcall(function() firesignal(b.Activated) end)
-		end
-	else
-		local vs = Cam.ViewportSize
-		x, y = vs.X * 0.8415, vs.Y * 0.659
-	end
-	local okk = pcall(function()
-		VIM:SendTouchEvent(7, 0, x, y)
-		task.wait(0.03)
-		VIM:SendTouchEvent(7, 2, x, y)
-	end)
-	if not okk then
-		pcall(function()
-			VIM:SendMouseButtonEvent(x, y, 0, true, game, 0)
-			task.wait(0.02)
-			VIM:SendMouseButtonEvent(x, y, 0, false, game, 0)
-		end)
-	end
-	if tool then pcall(function() tool:Activate() end) end
-end
-
-task.spawn(function()
-	local nextLoot = 0
-	while Gui.Parent do
-		local wait = 0.12
-		if S.AutoFarm and not S.Flying and not S.FlyFree then
-			local okk, e = pcall(function()
-				local r, h = myRoot(), myHum()
-				if not r or not h or h.Health <= 0 then wait = 0.5 return end
-
-				-- saqueia o que estiver perto (a cada 0.7s)
-				if os.clock() >= nextLoot then
-					nextLoot = os.clock() + 0.7
-					lootNow(S.LootRange)
-				end
-
-				if not pickNpc() then wait = 0.3 return end
-				shoot(pickGun())
-			end)
-			if not okk then fail("autofarm", e) end
-		end
-		task.wait(wait)
-	end
-end)
 
 -- ==========================================
 -- VOO LIVRE + ATRAVESSAR PAREDES
@@ -1366,6 +1177,11 @@ end))
 -- PAINEL (tema vermelho)
 -- ==========================================
 local Main, scale, status
+local baseScale = 1
+do
+	local vp0 = Cam.ViewportSize
+	baseScale = math.clamp(math.min((vp0.Y - 30) * 0.85 / 380, (vp0.X - 30) * 0.85 / 460), 0.7, 2.4)
+end
 local pages, chips = {}, {}
 
 local function showTab(name)
@@ -1380,15 +1196,14 @@ end
 
 local function buildPanel()
 	local vp = Cam.ViewportSize
-	local MW = math.min(360, vp.X - 24)
-	local MH = math.min(320, vp.Y - 24)
+	local MW, MH = 460, 380
 
-	Main = Corner(New("Frame", {Name = "Main", Size = UDim2.new(0, MW, 0, MH), Position = UDim2.new(0.5, -MW / 2, 0.5, -MH / 2),
+	Main = Corner(New("Frame", {Name = "Main", Size = UDim2.new(0, MW, 0, MH), AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.new(0.5, 0, 0.5, 0),
 		BackgroundColor3 = K.Bg1, BorderSizePixel = 0, ClipsDescendants = true}, Gui), 14)
 	New("UIGradient", {Rotation = 90, Color = ColorSequence.new(K.Bg1, K.Bg2)}, Main)
 	local ms = Stroke(Main, K.Red, 1.6, 0.1)
 	New("UIGradient", {Rotation = 60, Color = ColorSequence.new(K.Red2, K.DarkRed)}, ms)
-	scale = New("UIScale", {Scale = 1}, Main)
+	scale = New("UIScale", {Scale = baseScale}, Main)
 
 	-- marca d'agua com a imagem
 	New("ImageLabel", {Size = UDim2.new(0, 150, 0, 150), AnchorPoint = Vector2.new(1, 1), Position = UDim2.new(1, -4, 1, -22),
@@ -1404,6 +1219,26 @@ local function buildPanel()
 
 	local function HBtn(label, x, hover)
 		local b = Corner(New("TextButton", {Size = UDim2.new(0, 26, 0, 26), Position = UDim2.new(1, x, 0, 11), BackgroundColor3 = K.Card,
+			Text = label, Font = FB, TextSize = 13, TextColor3 = K.Dim, AutoButtonColor = false, BorderSizePixel = 0}, Header), 7)
+		b.MouseEnter:Connect(function() tween(b, {BackgroundColor3 = hover, TextColor3 = K.White}) end)
+		b.MouseLeave:Connect(function() tween(b, {BackgroundColor3 = K.Card, TextColor3 = K.Dim}) end)
+		return b
+	end
+	local BtnClose = HBtn("X", -38, K.Red)
+	local BtnMin = HBtn("-", -70, K.DarkRed)
+	draggable(Header, Main)
+
+	-- linha degrade sob o cabecalho
+	local hl = New("Frame", {Size = UDim2.new(1, -24, 0, 1), Position = UDim2.new(0, 12, 0, 48), BackgroundColor3 = K.Red,
+		BorderSizePixel = 0}, Main)
+	New("UIGradient", {Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1)})}, hl)
+
+	-- abas em formato de pilula
+	local names = {"MIRA", "ESP", "SPEED", "FARM", "DISCORD"}
+	local gap = 6
+	local chipW = (MW - 24 - gap * (#names - 1)) / #names
+	for i, n in ipairs(names) do
+		local b = Corner(New("TextButton", {Size = UDim2.new(0, chipW, 0, 26), Position = UDim2.new(0, 12 + (i - 1) * (chipW + gap), 0, 56),
 			Text = label, Font = FB, TextSize = 13, TextColor3 = K.Dim, AutoButtonColor = false, BorderSizePixel = 0}, Header), 7)
 		b.MouseEnter:Connect(function() tween(b, {BackgroundColor3 = hover, TextColor3 = K.White}) end)
 		b.MouseLeave:Connect(function() tween(b, {BackgroundColor3 = K.Card, TextColor3 = K.Dim}) end)
@@ -1751,8 +1586,6 @@ local function buildPanel()
 	Switch(pEsp, "ESP Vida", "Barra e número da vida", "Health")
 	Switch(pEsp, "ESP Nome", "Nome em cima da caixa", "ESPName")
 	Switch(pEsp, "ESP Distância", "Distância embaixo da caixa", "ESPDist")
-	Head(pEsp, "AJUSTE")
-	Slide(pEsp, "Ajuste vertical", -60, 60, "ESPOffset")
 	Head(pEsp, "COR DO ESP E DO FOV")
 	ColorWheel(pEsp)
 
@@ -1767,54 +1600,17 @@ local function buildPanel()
 	Switch(pSpd, "Stamina infinita", "Corre rápido sem cansar (procura a stamina do jogo)", "InfStamina")
 
 	local pFarm = pages.FARM
-	Head(pFarm, "AUTO FARM")
-	Switch(pFarm, "Auto farm", "Fica parado: atira nos NPCs perto e saqueia", "AutoFarm")
-	Switch(pFarm, "Saque automático", "Aperta \"saquear\" quando estiver perto de um corpo", "AutoLoot")
-	Action(pFarm, "Saquear agora", "Saqueia o que estiver perto de você", "SAQUEAR", function(b)
-		local n = lootNow(16)
-		note(n > 0 and "Saqueando..." or "Nada para saquear aqui perto.")
-	end)
-	Slide(pFarm, "Distância do saque (studs)", 8, 60, "LootRange")
-	Input(pFarm, "Nome da arma (opcional)", "ex: M4", "GunName")
-	Head(pFarm, "NPCS")
-	Switch(pFarm, "Aimbot NPC (farm)", "Gruda no NPC mais perto (pausa o aimbot de jogadores)", "NPCAim")
+	Head(pFarm, "AIMBOT NPC")
+	Switch(pFarm, "Aimbot NPC", "Gruda no NPC vivo mais perto (pausa o aimbot de jogadores)", "NPCAim")
 	Switch(pFarm, "Mirar na cabeça", "Desligado: mira no tronco (acerta mais fácil)", "NPCHead")
+	Switch(pFarm, "Ignorar NPC morto", "Não mira em NPC caído no chão", "IgnoreDead")
 	Slide(pFarm, "Distância dos NPCs (studs)", 20, 500, "NPCDist")
-	Input(pFarm, "Filtrar por nome", "ex: Zombie", "NPCName")
-	Head(pFarm, "VOO ATÉ O DESTINO")
-	Dropdown(pFarm, "Destino", {{"Farm Zone", "farm"}, {"Gun Shop", "gun"}, {"Equipamentos", "equip"}}, "Dest")
-	Dropdown(pFarm, "Modo de viagem", {{"Andar (seguro)", "walk"}, {"Voar", "fly"}}, "Travel")
-	Action(pFarm, "Ir até o destino", "Anda ou voa até o lugar escolhido", "IR", function(b)
-		local key = S.Dest
-		local label = DEST[key].label
-		local function go(pos)
-			if not validPos(pos) then note("Posição inválida. Vá até o lugar e use MARCAR.") return end
-			note("Indo para " .. label .. "...")
-			if S.Travel == "fly" then flyTo(pos, label) else walkTo(pos, label) end
-		end
-		if marks[key] then go(marks[key]) return end
-		b.Text = "PROCURANDO..."
-		task.spawn(function()
-			local okk, pos = pcall(findPlace, key)
-			pcall(function() b.Text = "IR" end)
-			if okk and pos then go(pos)
-			else note("Não achei " .. label .. " pelo nome. Vá até lá, escolha o destino e toque em MARCAR.") end
-		end)
-	end)
-	Action(pFarm, "Marcar este lugar", "Salva sua posição no destino escolhido", "MARCAR", function(b)
-		local r = myRoot()
-		if r then
-			marks[S.Dest] = r.Position
-			b.Text = "MARCADO!"
-			note(DEST[S.Dest].label .. " marcado!")
-			task.delay(1.5, function() pcall(function() b.Text = "MARCAR" end) end)
-		end
-	end)
-	Action(pFarm, "Cancelar voo", "Para o voo e você cai no chão", "CANCELAR", function()
-		stopFly()
-		note("Voo cancelado.")
-	end)
-	Slide(pFarm, "Velocidade do voo", 15, 80, "FlySpeed")
+	Head(pFarm, "FOV")
+	Switch(pFarm, "Mostrar círculo do FOV", "Ligado: só mira em NPC dentro do círculo", "NPCShowFOV")
+	Slide(pFarm, "Tamanho do FOV", 40, 500, "NPCFOV")
+	Head(pFarm, "ESP NPC")
+	Switch(pFarm, "ESP Caixa NPC", "Quadrado em volta dos NPCs vivos", "NPCBox")
+	Switch(pFarm, "ESP Esqueleto NPC", "Ossos dos NPCs vivos", "NPCSkel")
 
 	local pDc = pages.DISCORD
 	Head(pDc, "COMUNIDADE")
@@ -1858,9 +1654,9 @@ end
 local function setPanel(show)
 	if not Main then return end
 	if show then
-		scale.Scale = 0.94
+		scale.Scale = baseScale * 0.94
 		Main.Visible = true
-		tween(scale, {Scale = 1}, TweenInfo.new(0.16, Enum.EasingStyle.Back, Enum.EasingDirection.Out))
+		tween(scale, {Scale = baseScale}, TweenInfo.new(0.16, Enum.EasingStyle.Back, Enum.EasingDirection.Out))
 	else
 		Main.Visible = false
 	end
@@ -1875,6 +1671,7 @@ local function buildFloat()
 		BackgroundColor3 = K.Bg1, BackgroundTransparency = 0.25, BorderSizePixel = 0, Image = IMG, ScaleType = Enum.ScaleType.Crop,
 		AutoButtonColor = false, ZIndex = 60}, Gui), 16)
 	Stroke(Fl, K.Red, 2, 0.1)
+	New("UIScale", {Scale = math.clamp(baseScale * 0.8, 1, 1.6)}, Fl)
 	draggable(Fl, Fl, function() setPanel(not (Main and Main.Visible)) end)
 
 	-- se a imagem nao carregar, mostra uma letra no lugar
@@ -1950,17 +1747,18 @@ Gui.Destroying:Connect(function()
 	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
 	for part in pairs(headOrig) do restoreHead(part) end
 	pcall(restoreSpread)
-	pcall(stopFly)
-	S.FlyFree, S.AutoFarm, S.Noclip = false, false, false
+	S.FlyFree, S.Noclip = false, false
 	pcall(function() local hh = myHum() if hh then hh.PlatformStand = false end end)
 	for _, o in pairs(ESP) do killObj(o) end
+	for _, o in pairs(ESPN) do killObj(o) end
 	if fov then pcall(function() fov:Remove() end) end
+	if npcFov then pcall(function() npcFov:Remove() end) end
+	pcall(function() EG:Destroy() end)
 	local h = myHum()
 	if h and S.SpeedOn then h.WalkSpeed = 16 end
 end)
 
 note("Pronto! Toque na imagem para abrir/fechar.")
-if not draw then note("Seu executor nao tem Drawing: ESP e FOV desativados.") end
 
 end)
 
