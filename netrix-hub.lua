@@ -43,7 +43,7 @@ local S = {
 	NoSpread = false, BigHead = false, HeadSize = 4,
 	NPCAim = false, NPCHead = false, NPCDist = 120, NPCName = "", IgnoreDead = true,
 	NPCShowFOV = false, NPCFOV = 160, NPCBox = false, NPCSkel = false,
-	InfStamina = false,
+	InfStamina = false, Silent = false, SilentNPC = false,
 	FlyFree = false, FlyFreeSpeed = 40, Noclip = false,
 	ESPName = false, ESPDist = false, ColESP = K.Red, ColFOV = K.Red,
 }
@@ -503,6 +503,95 @@ local function aimNpc(dt)
 	if not part then return end
 	aimAtPoint(part.Position, dt)
 end
+
+-- ==========================================
+-- SILENT AIM: a bala vai para o alvo mesmo com a mira em outro lugar
+-- Redireciona os "raios" do tiro (Raycast/FindPartOnRay) e o Mouse.Hit/Target
+-- quando eles saem de perto de você. Precisa de executor com hookmetamethod.
+-- ==========================================
+local silentPart
+local silentHooked, silentAlive = false, true
+local sHead, sT = true, 0
+
+local function silentStep()
+	silentPart = nil
+	if not (S.Silent or S.SilentNPC) then return end
+	local c0 = Cam.ViewportSize / 2
+
+	if S.Silent then
+		local pl = pickTarget(c0)
+		if pl then
+			local ch = charOf(pl)
+			if os.clock() - sT > 1.5 then sT, sHead = os.clock(), roll() end
+			local part = ch and bodyPart(ch, sHead)
+			if part and part.Parent then silentPart = part return end
+		end
+	end
+
+	if S.SilentNPC then
+		local m = pickNpc()
+		if m then
+			local part = (S.NPCHead and m:FindFirstChild("Head")) or m:FindFirstChild("UpperTorso")
+				or m:FindFirstChild("Torso") or rootOf(m)
+			if part and part.Parent then silentPart = part end
+		end
+	end
+end
+
+local function nearMe(v)
+	return (v - Cam.CFrame.Position).Magnitude < 12 or (v - myPos()).Magnitude < 12
+end
+
+pcall(function()
+	local function hookMeta(name, fn)
+		local f = newcclosure and newcclosure(fn) or fn
+		if hookmetamethod then return hookmetamethod(game, name, f) end
+		local mt = getrawmetatable(game)
+		local old = rawget(mt, name)
+		if setreadonly then setreadonly(mt, false) elseif make_writeable then make_writeable(mt) end
+		rawset(mt, name, f)
+		return old
+	end
+
+	local function active()
+		return silentAlive and silentPart and silentPart.Parent and not (checkcaller and checkcaller())
+	end
+
+	local oldNC
+	oldNC = hookMeta("__namecall", function(self, ...)
+		if active() and self == WS then
+			local m = getnamecallmethod()
+			local n = select("#", ...)
+			local a = {...}
+			if m == "Raycast" then
+				local o, d = a[1], a[2]
+				if typeof(o) == "Vector3" and typeof(d) == "Vector3" and d.Magnitude > 30 and nearMe(o) then
+					a[2] = (silentPart.Position - o).Unit * d.Magnitude
+					return oldNC(self, table.unpack(a, 1, n))
+				end
+			elseif m == "FindPartOnRay" or m == "FindPartOnRayWithIgnoreList" or m == "FindPartOnRayWithWhitelist" then
+				local r = a[1]
+				if typeof(r) == "Ray" and r.Direction.Magnitude > 30 and nearMe(r.Origin) then
+					a[1] = Ray.new(r.Origin, (silentPart.Position - r.Origin).Unit * r.Direction.Magnitude)
+					return oldNC(self, table.unpack(a, 1, n))
+				end
+			end
+		end
+		return oldNC(self, ...)
+	end)
+
+	local mouse = LP:GetMouse()
+	local oldIdx
+	oldIdx = hookMeta("__index", function(self, k)
+		if self == mouse and active() then
+		if k == "Hit" then return CFrame.new(silentPart.Position) end
+			if k == "Target" then return silentPart end
+		end
+		return oldIdx(self, k)
+	end)
+
+	silentHooked = true
+end)
 
 -- ==========================================
 -- CABEÇA GRANDE (só no seu jogo: muda o tamanho da cabeça dos outros na sua tela)
@@ -1103,6 +1192,9 @@ local function step(dt)
 		if not okk then fail("fov npc", e) end
 	end
 
+	local okS, eS = pcall(silentStep)
+	if not okS then fail("silent", eS) end
+
 	if S.NPCAim then
 		local okk, e = pcall(aimNpc, dt)
 		if not okk then fail("npc", e) end
@@ -1185,7 +1277,7 @@ end
 local pages, chips = {}, {}
 
 local function showTab(name)
-	for n, pg in pairs(pages) do pg.Visible = (n == name) end
+for n, pg in pairs(pages) do pg.Visible = (n == name) end
 	for n, c in pairs(chips) do
 		local on = (n == name)
 		tween(c.btn, {BackgroundColor3 = on and K.Red or K.Card})
@@ -1227,26 +1319,8 @@ local function buildPanel()
 	local BtnClose = HBtn("X", -38, K.Red)
 	local BtnMin = HBtn("-", -70, K.DarkRed)
 	draggable(Header, Main)
-
-	-- linha degrade sob o cabecalho
-	local hl = New("Frame", {Size = UDim2.new(1, -24, 0, 1), Position = UDim2.new(0, 12, 0, 48), BackgroundColor3 = K.Red,
-		BorderSizePixel = 0}, Main)
-	New("UIGradient", {Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0), NumberSequenceKeypoint.new(1, 1)})}, hl)
-
-	-- abas em formato de pilula
-	local names = {"MIRA", "ESP", "SPEED", "FARM", "DISCORD"}
-	local gap = 6
-	local chipW = (MW - 24 - gap * (#names - 1)) / #names
-	for i, n in ipairs(names) do
-		local b = Corner(New("TextButton", {Size = UDim2.new(0, chipW, 0, 26), Position = UDim2.new(0, 12 + (i - 1) * (chipW + gap), 0, 56),
-			Text = label, Font = FB, TextSize = 13, TextColor3 = K.Dim, AutoButtonColor = false, BorderSizePixel = 0}, Header), 7)
-		b.MouseEnter:Connect(function() tween(b, {BackgroundColor3 = hover, TextColor3 = K.White}) end)
-		b.MouseLeave:Connect(function() tween(b, {BackgroundColor3 = K.Card, TextColor3 = K.Dim}) end)
-		return b
-	end
-	local BtnClose = HBtn("X", -38, K.Red)
-	local BtnMin = HBtn("-", -70, K.DarkRed)
-	draggable(Header, Main)
+	BtnMin.MouseButton1Click:Connect(function() Main.Visible = false end)
+	BtnClose.MouseButton1Click:Connect(function() Gui:Destroy() end)
 
 	-- linha degrade sob o cabecalho
 	local hl = New("Frame", {Size = UDim2.new(1, -24, 0, 1), Position = UDim2.new(0, 12, 0, 48), BackgroundColor3 = K.Red,
@@ -1272,6 +1346,8 @@ local function buildPanel()
 		pages[n] = pg
 		b.MouseButton1Click:Connect(function() showTab(n) end)
 	end
+
+	showTab("MIRA")
 
 	-- rodape de status
 	status = Lbl(Main, "", UDim2.new(0, 14, 1, -22), UDim2.new(1, -28, 0, 16), FM, 10, K.Dim)
@@ -1564,9 +1640,11 @@ local function buildPanel()
 	-- conteudo das abas ------------------------------------------
 	local pMira, pEsp, pSpd = pages.MIRA, pages.ESP, pages.SPEED
 
+	local okS, eS = pcall(function()
 	Head(pMira, "AIMBOT")
 	Switch(pMira, "Ativar aimbot", "Gruda a mira no inimigo mais próximo", "Aim")
 	Dropdown(pMira, "Chance de headshot", {{"100% HS", 100}, {"70% HS", 70}, {"50% HS", 50}, {"30% HS", 30}}, "HS")
+	Switch(pMira, "Silent aim", "Bala vai no alvo sem mirar nele (usa FOV e distância)", "Silent")
 	Switch(pMira, "Ignorar time", "Vale para a mira e para o ESP", "IgnoreTeam")
 	Head(pMira, "ALCANCE")
 	Switch(pMira, "Mostrar círculo do FOV", "Área onde o aimbot procura alvos", "ShowFOV")
@@ -1578,7 +1656,10 @@ local function buildPanel()
 	Head(pMira, "HITBOX")
 	Switch(pMira, "Aumentar cabeça", "Cabeça dos inimigos maior (só no seu jogo)", "BigHead")
 	Slide(pMira, "Tamanho da cabeça", 2, 12, "HeadSize")
+	end)
+	if not okS then fail("aba mira", eS) end
 
+	local okS, eS = pcall(function()
 	Head(pEsp, "DESENHOS")
 	Switch(pEsp, "ESP Line", "Linha do topo da tela até o jogador", "Line")
 	Switch(pEsp, "ESP Caixa", "Quadrado em volta do jogador", "Box")
@@ -1588,7 +1669,10 @@ local function buildPanel()
 	Switch(pEsp, "ESP Distância", "Distância embaixo da caixa", "ESPDist")
 	Head(pEsp, "COR DO ESP E DO FOV")
 	ColorWheel(pEsp)
+	end)
+	if not okS then fail("aba esp", eS) end
 
+	local okS, eS = pcall(function()
 	Head(pSpd, "CORRIDA")
 	Switch(pSpd, "Ativar speed", "Aumenta a velocidade mesmo se o jogo travar", "SpeedOn")
 	Slide(pSpd, "Velocidade (recomendado 30)", 16, 60, "Speed")
@@ -1598,12 +1682,16 @@ local function buildPanel()
 	Switch(pSpd, "Atravessar paredes", "Noclip", "Noclip")
 	Head(pSpd, "STAMINA")
 	Switch(pSpd, "Stamina infinita", "Corre rápido sem cansar (procura a stamina do jogo)", "InfStamina")
+	end)
+	if not okS then fail("aba speed", eS) end
 
+	local okS, eS = pcall(function()
 	local pFarm = pages.FARM
 	Head(pFarm, "AIMBOT NPC")
 	Switch(pFarm, "Aimbot NPC", "Gruda no NPC vivo mais perto (pausa o aimbot de jogadores)", "NPCAim")
 	Switch(pFarm, "Mirar na cabeça", "Desligado: mira no tronco (acerta mais fácil)", "NPCHead")
 	Switch(pFarm, "Ignorar NPC morto", "Não mira em NPC caído no chão", "IgnoreDead")
+	Switch(pFarm, "Silent aim NPC", "Bala vai no NPC mais perto sem mirar nele", "SilentNPC")
 	Slide(pFarm, "Distância dos NPCs (studs)", 20, 500, "NPCDist")
 	Head(pFarm, "FOV")
 	Switch(pFarm, "Mostrar círculo do FOV", "Ligado: só mira em NPC dentro do círculo", "NPCShowFOV")
@@ -1611,7 +1699,10 @@ local function buildPanel()
 	Head(pFarm, "ESP NPC")
 	Switch(pFarm, "ESP Caixa NPC", "Quadrado em volta dos NPCs vivos", "NPCBox")
 	Switch(pFarm, "ESP Esqueleto NPC", "Ossos dos NPCs vivos", "NPCSkel")
+	end)
+	if not okS then fail("aba farm", eS) end
 
+	local okS, eS = pcall(function()
 	local pDc = pages.DISCORD
 	Head(pDc, "COMUNIDADE")
 
@@ -1644,11 +1735,11 @@ local function buildPanel()
 
 	local linkRow = Card(pDc, 34)
 	Lbl(linkRow, "discord.gg/yQyvXYM2CK", UDim2.new(0, 12, 0, 0), UDim2.new(1, -24, 1, 0), FB, 12, K.Red2, Enum.TextXAlignment.Center)
+	end)
+	if not okS then fail("aba discord", eS) end
 
 	showTab("MIRA")
 
-	BtnMin.MouseButton1Click:Connect(function() Main.Visible = false end)
-	BtnClose.MouseButton1Click:Connect(function() Gui:Destroy() end)
 end
 
 local function setPanel(show)
@@ -1710,6 +1801,7 @@ task.spawn(function()
 						if m.Parent and h.Health > 0 and nameOk(m) then c = c + 1 end
 					end
 					local extra = S.InfStamina and string.format("  •  Stamina: %d", #stamEntries) or ""
+					if (S.Silent or S.SilentNPC) and not silentHooked then extra = extra .. "  •  Silent: executor sem hook" end
 					status.Text = string.format("Alvos: %d  •  NPCs: %d  •  Drawing: %s", n, c, draw and "ok" or "indisponível") .. extra
 					status.TextColor3 = K.Dim
 				end
@@ -1748,6 +1840,7 @@ Gui.Destroying:Connect(function()
 	for part in pairs(headOrig) do restoreHead(part) end
 	pcall(restoreSpread)
 	S.FlyFree, S.Noclip = false, false
+	silentAlive = false
 	pcall(function() local hh = myHum() if hh then hh.PlatformStand = false end end)
 	for _, o in pairs(ESP) do killObj(o) end
 	for _, o in pairs(ESPN) do killObj(o) end
@@ -1765,4 +1858,4 @@ end)
 if not okAll then
 	warn("[Netrix] erro: " .. tostring(errAll))
 	note("ERRO: " .. string.sub(tostring(errAll), 1, 150))
-end
+end		
